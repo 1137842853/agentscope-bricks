@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from agentscope_bricks.base.component import Component
 from agentscope_bricks.utils.tracing_utils.wrapper import trace
 from agentscope_bricks.utils.api_key_util import ApiNames, get_api_key
-from agentscope_bricks.utils.mcp_util import MCPUtil
+from agentscope_bricks.utils.tracing_utils import TracingUtil
 
 
 class SpeechToVideoSubmitInput(BaseModel):
@@ -152,7 +152,7 @@ class SpeechToVideoSubmit(
             RuntimeError: If task submission fails
         """
         trace_event = kwargs.pop("trace_event", None)
-        request_id = MCPUtil._get_mcp_dash_request_id(args.ctx)
+        request_id = TracingUtil.get_request_id()
 
         try:
             api_key = get_api_key(ApiNames.dashscope_api_key, **kwargs)
@@ -190,6 +190,14 @@ class SpeechToVideoSubmit(
                 },
             )
 
+        if (
+            response.status_code != HTTPStatus.OK
+            or not response.output
+            or response.output.get("task_status", "UNKNOWN")
+            in ["FAILED", "CANCELED"]
+        ):
+            raise RuntimeError(f"Failed to submit task: {response}")
+
         if not request_id:
             request_id = (
                 response.request_id
@@ -198,16 +206,8 @@ class SpeechToVideoSubmit(
             )
 
         # Extract task information from response
-        if hasattr(response, "output") and hasattr(response.output, "task_id"):
-            task_id = response.output.task_id
-            task_status = getattr(response.output, "task_status", "PENDING")
-        else:
-            # Handle dict-style response
-            if isinstance(response.output, dict):
-                task_id = response.output.get("task_id")
-                task_status = response.output.get("task_status", "PENDING")
-            else:
-                raise RuntimeError(f"Unexpected response format: {response}")
+        task_id = response.output.get("task_id", "")
+        task_status = response.output.get("task_status", "UNKNOWN")
 
         result = SpeechToVideoSubmitOutput(
             request_id=request_id,
@@ -332,7 +332,7 @@ class SpeechToVideoFetch(
             RuntimeError: If video fetch fails or response status is not OK
         """
         trace_event = kwargs.pop("trace_event", None)
-        request_id = MCPUtil._get_mcp_dash_request_id(args.ctx)
+        request_id = TracingUtil.get_request_id()
 
         try:
             api_key = get_api_key(ApiNames.dashscope_api_key, **kwargs)
@@ -343,9 +343,6 @@ class SpeechToVideoFetch(
             api_key=api_key,
             task=args.task_id,
         )
-
-        if response.status_code != HTTPStatus.OK:
-            raise RuntimeError(f"Failed to get video URL: {response}")
 
         # Log trace event if provided
         if trace_event:
@@ -359,6 +356,14 @@ class SpeechToVideoFetch(
                     },
                 },
             )
+
+        if (
+            response.status_code != HTTPStatus.OK
+            or not response.output
+            or response.output.get("task_status", "UNKNOWN")
+            in ["FAILED", "CANCELED"]
+        ):
+            raise RuntimeError(f"Failed to fetch result: {response}")
 
         # Handle request ID
         if not request_id:
@@ -484,7 +489,7 @@ if __name__ == "__main__":
 
             # Step 3: Poll for task completion using SpeechToVideoFetch
             print(f"\n🔄 轮询 {len(task_ids)} 个任务的完成状态...")
-            max_wait_time = 600  # 10 minutes timeout for video generation
+            max_wait_time = 15 * 60  # 15 minutes timeout for video generation
             poll_interval = 5  # 5 seconds polling interval
             completed_tasks = {}
 

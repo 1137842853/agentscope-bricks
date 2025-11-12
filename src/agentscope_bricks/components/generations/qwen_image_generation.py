@@ -2,7 +2,6 @@
 import asyncio
 import os
 import uuid
-from distutils.util import strtobool
 from typing import Any, Optional
 
 from dashscope import AioMultiModalConversation
@@ -10,10 +9,12 @@ from mcp.server.fastmcp import Context
 from pydantic import BaseModel, Field
 
 from agentscope_bricks.base.component import Component
-from agentscope_bricks.utils.tracing_utils import TraceType
-from agentscope_bricks.utils.tracing_utils import trace
+from agentscope_bricks.utils.tracing_utils import (
+    TraceType,
+    TracingUtil,
+    trace,
+)
 from agentscope_bricks.utils.api_key_util import ApiNames, get_api_key
-from agentscope_bricks.utils.mcp_util import MCPUtil
 
 
 class QwenImageGenInput(BaseModel):
@@ -40,6 +41,10 @@ class QwenImageGenInput(BaseModel):
     prompt_extend: Optional[bool] = Field(
         default=None,
         description="是否开启prompt智能改写，开启后使用大模型对输入prompt进行智能改写",
+    )
+    watermark: Optional[bool] = Field(
+        default=None,
+        description="是否添加水印，默认不设置。可设置为true或false。",
     )
     ctx: Optional[Context] = Field(
         default=None,
@@ -101,7 +106,7 @@ class QwenImageGen(Component[QwenImageGenInput, QwenImageGenOutput]):
         """
 
         trace_event = kwargs.pop("trace_event", None)
-        request_id = MCPUtil._get_mcp_dash_request_id(args.ctx)
+        request_id = TracingUtil.get_request_id()
 
         try:
             api_key = get_api_key(ApiNames.dashscope_api_key, **kwargs)
@@ -112,11 +117,6 @@ class QwenImageGen(Component[QwenImageGenInput, QwenImageGenOutput]):
             "model_name",
             os.getenv("QWEN_IMAGE_GENERATION_MODEL_NAME", "qwen-image"),
         )
-        watermark_env = os.getenv("QWEN_IMAGE_GENERATION_ENABLE_WATERMARK")
-        if watermark_env is not None:
-            watermark = strtobool(watermark_env)
-        else:
-            watermark = kwargs.pop("watermark", True)
 
         # Prepare messages in the format expected by MultiModalConversation
         messages = [
@@ -137,8 +137,8 @@ class QwenImageGen(Component[QwenImageGenInput, QwenImageGenOutput]):
             parameters["n"] = args.n
         if args.prompt_extend is not None:
             parameters["prompt_extend"] = args.prompt_extend
-        if watermark is not None:
-            parameters["watermark"] = watermark
+        if args.watermark is not None:
+            parameters["watermark"] = args.watermark
 
         # Call the AioMultiModalConversation API asynchronously
         try:
@@ -152,14 +152,8 @@ class QwenImageGen(Component[QwenImageGenInput, QwenImageGenOutput]):
             raise RuntimeError(f"Failed to call Qwen Image Edit API: {str(e)}")
 
         # Check response status
-        if response.status_code != 200:
-            error_msg = (
-                f"HTTP status code: {response.status_code}, "
-                f"Error code: {getattr(response, 'code', 'Unknown')}, "
-                f"Error message:"
-                f" {getattr(response, 'message', 'Unknown error')}"
-            )
-            raise RuntimeError(f"Qwen Image Edit API error: {error_msg}")
+        if response.status_code != 200 or not response.output:
+            raise RuntimeError(f"Failed to generate: {response}")
 
         # Extract the edited image URLs from response
         try:

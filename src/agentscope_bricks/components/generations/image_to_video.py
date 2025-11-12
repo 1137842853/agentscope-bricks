@@ -3,7 +3,6 @@ import asyncio
 import os
 import time
 import uuid
-from distutils.util import strtobool
 from http import HTTPStatus
 from typing import Any, Optional
 
@@ -15,7 +14,7 @@ from agentscope_bricks.base.component import Component
 from agentscope_bricks.utils.tracing_utils.wrapper import trace
 
 from agentscope_bricks.utils.api_key_util import ApiNames, get_api_key
-from agentscope_bricks.utils.mcp_util import MCPUtil
+from agentscope_bricks.utils.tracing_utils import TracingUtil
 
 
 class ImageToVideoInput(BaseModel):
@@ -50,6 +49,10 @@ class ImageToVideoInput(BaseModel):
     prompt_extend: Optional[bool] = Field(
         default=None,
         description="是否开启prompt智能改写，开启后使用大模型对输入prompt进行智能改写",
+    )
+    watermark: Optional[bool] = Field(
+        default=None,
+        description="是否添加水印，默认不设置。可设置为true或false。",
     )
     ctx: Optional[Context] = Field(
         default=None,
@@ -117,7 +120,7 @@ class ImageToVideo(Component[ImageToVideoInput, ImageToVideoOutput]):
             RuntimeError: If video generation fails
         """
         trace_event = kwargs.pop("trace_event", None)
-        request_id = MCPUtil._get_mcp_dash_request_id(args.ctx)
+        request_id = TracingUtil.get_request_id()
 
         try:
             api_key = get_api_key(ApiNames.dashscope_api_key, **kwargs)
@@ -128,11 +131,6 @@ class ImageToVideo(Component[ImageToVideoInput, ImageToVideoOutput]):
             "model_name",
             os.getenv("IMAGE_TO_VIDEO_MODEL_NAME", "wan2.2-i2v-flash"),
         )
-        watermark_env = os.getenv("IMAGE_TO_VIDEO_ENABLE_WATERMARK")
-        if watermark_env is not None:
-            watermark = strtobool(watermark_env)
-        else:
-            watermark = kwargs.pop("watermark", True)
 
         parameters = {}
         if args.resolution:
@@ -141,8 +139,8 @@ class ImageToVideo(Component[ImageToVideoInput, ImageToVideoOutput]):
             parameters["duration"] = args.duration
         if args.prompt_extend is not None:
             parameters["prompt_extend"] = args.prompt_extend
-        if watermark is not None:
-            parameters["watermark"] = watermark
+        if args.watermark is not None:
+            parameters["watermark"] = args.watermark
 
         # Create AioVideoSynthesis instance
         aio_video_synthesis = AioVideoSynthesis()
@@ -157,6 +155,13 @@ class ImageToVideo(Component[ImageToVideoInput, ImageToVideoOutput]):
             template=args.template,
             **parameters,
         )
+
+        if (
+            task_response.status_code != HTTPStatus.OK
+            or not task_response.output
+            or task_response.output.task_status in ["FAILED", "CANCELED"]
+        ):
+            raise RuntimeError(f"Failed to submit task: {task_response}")
 
         # Poll for task completion using async methods
         max_wait_time = 600  # 10 minutes timeout for video generation
@@ -173,16 +178,20 @@ class ImageToVideo(Component[ImageToVideoInput, ImageToVideoOutput]):
                 task=task_response,
             )
 
+            if (
+                res.status_code != HTTPStatus.OK
+                or not res.output
+                or res.output.task_status in ["FAILED", "CANCELED"]
+            ):
+                raise RuntimeError(f"Failed to fetch result: {res}")
+
             # Check task completion status
             if res.status_code == HTTPStatus.OK:
                 if hasattr(res.output, "task_status"):
                     if res.output.task_status == "SUCCEEDED":
                         break
                     elif res.output.task_status in ["FAILED", "CANCELED"]:
-                        raise RuntimeError(
-                            f"Video generation failed: task_status="
-                            f"{res.output.task_status}, response={res}",
-                        )
+                        raise RuntimeError(f"Failed to generate: {res}")
                 else:
                     # If no task_status field, assume completed
                     break

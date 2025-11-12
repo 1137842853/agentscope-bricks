@@ -15,7 +15,7 @@ from agentscope_bricks.utils.api_key_util import ApiNames, get_api_key
 from agentscope_bricks.utils.tracing_utils import TracingUtil
 
 
-class ImageToVideoSubmitInput(BaseModel):
+class ImageToVideoWan25SubmitInput(BaseModel):
     """
     Input model for image-to-video generation submission.
 
@@ -34,6 +34,16 @@ class ImageToVideoSubmitInput(BaseModel):
     negative_prompt: Optional[str] = Field(
         default=None,
         description="反向提示词，用来描述不希望在视频画面中看到的内容",
+    )
+    audio_url: Optional[str] = Field(
+        default=None,
+        description="自定义音频文件URL，模型将使用该音频生成视频。"
+        "参数优先级：audio_url > audio，仅在 audio_url 为空时audio生效。",
+    )
+    audio: Optional[bool] = Field(
+        default=None,
+        description="是否自动生成音频。"
+        "参数优先级：audio_url > audio，仅在 audio_url 为空时audio生效。",
     )
     template: Optional[str] = Field(
         default=None,
@@ -62,7 +72,7 @@ class ImageToVideoSubmitInput(BaseModel):
     )
 
 
-class ImageToVideoSubmitOutput(BaseModel):
+class ImageToVideoWan25SubmitOutput(BaseModel):
     """
     Output model for image-to-video generation submission.
 
@@ -88,8 +98,8 @@ class ImageToVideoSubmitOutput(BaseModel):
     )
 
 
-class ImageToVideoSubmit(
-    Component[ImageToVideoSubmitInput, ImageToVideoSubmitOutput],
+class ImageToVideoWan25Submit(
+    Component[ImageToVideoWan25SubmitInput, ImageToVideoWan25SubmitOutput],
 ):
     """
     Service for submitting image-to-video generation tasks.
@@ -99,18 +109,18 @@ class ImageToVideoSubmit(
     It supports various video effects and customization options.
     """
 
-    name: str = "modelstudio_image_to_video_submit_task"
+    name: str = "modelstudio_image_to_video_wan25_submit_task"
     description: str = (
         "通义万相-图生视频模型的异步任务提交工具。根据首帧图像和文本提示词，生成时长为5秒的无声视频。"
         "同时支持特效模板，可添加“魔法悬浮”、“气球膨胀”等效果，适用于创意视频制作、娱乐特效展示等场景。"
     )
 
-    @trace(trace_type="AIGC", trace_name="image_to_video_submit")
+    @trace(trace_type="AIGC", trace_name="image_to_video_wan25_submit")
     async def arun(
         self,
-        args: ImageToVideoSubmitInput,
+        args: ImageToVideoWan25SubmitInput,
         **kwargs: Any,
-    ) -> ImageToVideoSubmitOutput:
+    ) -> ImageToVideoWan25SubmitOutput:
         """
         Submit an image-to-video generation task using DashScope API.
 
@@ -119,16 +129,16 @@ class ImageToVideoSubmit(
         effects, resolution settings, and prompt enhancements.
 
         Args:
-            args: ImageToVideoSubmitInput containing required image_url and
-                  optional parameters for video generation
+            args: ImageToVideoWan25SubmitInput containing required image_url
+                  and optional parameters for video generation
             **kwargs: Additional keyword arguments including:
                 - request_id: Optional request ID for tracking
                 - model_name: Model name (defaults to wan2.2-i2v-flash)
                 - api_key: DashScope API key for authentication
 
         Returns:
-            ImageToVideoSubmitOutput containing the task ID, current status,
-            and request ID for tracking the submission
+            ImageToVideoWan25SubmitOutput containing the task ID, current
+            status, and request ID for tracking the submission
 
         Raises:
             ValueError: If DASHSCOPE_API_KEY is not set or invalid
@@ -144,10 +154,12 @@ class ImageToVideoSubmit(
 
         model_name = kwargs.get(
             "model_name",
-            os.getenv("IMAGE_TO_VIDEO_MODEL_NAME", "wan2.2-i2v-flash"),
+            os.getenv("IMAGE_TO_VIDEO_MODEL_NAME", "wan2.5-i2v-preview"),
         )
 
         parameters = {}
+        if args.audio is not None:
+            parameters["audio"] = args.audio
         if args.resolution:
             parameters["resolution"] = args.resolution
         if args.duration is not None:
@@ -167,6 +179,7 @@ class ImageToVideoSubmit(
             img_url=args.image_url,
             prompt=args.prompt,
             negative_prompt=args.negative_prompt,
+            audio_url=args.audio_url,
             template=args.template,
             **parameters,
         )
@@ -198,7 +211,7 @@ class ImageToVideoSubmit(
                 else str(uuid.uuid4())
             )
 
-        result = ImageToVideoSubmitOutput(
+        result = ImageToVideoWan25SubmitOutput(
             request_id=request_id,
             task_id=response.output.task_id,
             task_status=response.output.task_status,
@@ -206,7 +219,7 @@ class ImageToVideoSubmit(
         return result
 
 
-class ImageToVideoFetchInput(BaseModel):
+class ImageToVideoWan25FetchInput(BaseModel):
     """
     Input model for fetching image-to-video generation results.
 
@@ -225,7 +238,7 @@ class ImageToVideoFetchInput(BaseModel):
     )
 
 
-class ImageToVideoFetchOutput(BaseModel):
+class ImageToVideoWan25FetchOutput(BaseModel):
     """
     Output model for fetching image-to-video generation results.
 
@@ -256,8 +269,8 @@ class ImageToVideoFetchOutput(BaseModel):
     )
 
 
-class ImageToVideoFetch(
-    Component[ImageToVideoFetchInput, ImageToVideoFetchOutput],
+class ImageToVideoWan25Fetch(
+    Component[ImageToVideoWan25FetchInput, ImageToVideoWan25FetchOutput],
 ):
     """
     Service for fetching image-to-video generation results.
@@ -267,17 +280,17 @@ class ImageToVideoFetch(
     DashScope's VideoSynthesis API.
     """
 
-    name: str = "modelstudio_image_to_video_fetch_result"
+    name: str = "modelstudio_image_to_video_wan25_fetch_result"
     description: str = (
         "通义万相-图生视频模型的异步任务结果查询工具，根据Task ID查询任务结果。"
     )
 
-    @trace(trace_type="AIGC", trace_name="image_to_video_fetch")
+    @trace(trace_type="AIGC", trace_name="image_to_video_wan25_fetch")
     async def arun(
         self,
-        args: ImageToVideoFetchInput,
+        args: ImageToVideoWan25FetchInput,
         **kwargs: Any,
-    ) -> ImageToVideoFetchOutput:
+    ) -> ImageToVideoWan25FetchOutput:
         """
         Fetch the results of an image-to-video generation task.
 
@@ -286,13 +299,14 @@ class ImageToVideoFetch(
         task ID returned from the submission.
 
         Args:
-            args: ImageToVideoFetchInput containing the task_id parameter
+            args: ImageToVideoWan25FetchInput containing the task_id
+                  parameter
             **kwargs: Additional keyword arguments including:
                 - api_key: DashScope API key for authentication
 
         Returns:
-            ImageToVideoFetchOutput containing the video URL, current task
-            status, and request ID
+            ImageToVideoWan25FetchOutput containing the video URL, current
+            task status, and request ID
 
         Raises:
             ValueError: If DASHSCOPE_API_KEY is not set or invalid
@@ -342,7 +356,7 @@ class ImageToVideoFetch(
                 else str(uuid.uuid4())
             )
 
-        result = ImageToVideoFetchOutput(
+        result = ImageToVideoWan25FetchOutput(
             video_url=response.output.video_url,
             task_id=response.output.task_id,
             task_status=response.output.task_status,
@@ -353,8 +367,13 @@ class ImageToVideoFetch(
 
 
 if __name__ == "__main__":
-    image_to_video_submit = ImageToVideoSubmit()
-    image_to_video_fetch = ImageToVideoFetch()
+    audio_url = (
+        "https://help-static-aliyun-doc.aliyuncs.com/file-manage-files"
+        "/zh-CN/20250923/hbiayh/%E4%BB%8E%E5%86%9B%E8%A1%8C.mp3"
+    )
+
+    image_to_video_submit = ImageToVideoWan25Submit()
+    image_to_video_fetch = ImageToVideoWan25Fetch()
 
     async def main() -> None:
         import time
@@ -365,17 +384,18 @@ if __name__ == "__main__":
         )
 
         test_inputs = [
-            ImageToVideoSubmitInput(
+            ImageToVideoWan25SubmitInput(
                 image_url=image_url,
                 prompt="女孩把小狗抱起来",
-                resolution="1080P",
-                prompt_extend=True,
+                audio_url=audio_url,
+                watermark=True,
+                # resolution="1080P",
             ),
-            # ImageToVideoSubmitInput(
+            # ImageToVideoWan25SubmitInput(
             #     image_url=image_url,
-            #     prompt="小狗把女孩抱起来",
-            #     resolution="480P",
-            #     prompt_extend=True,
+            #     prompt="女孩把小狗抱起来",
+            #     audio_url=audio_url,
+            #     # resolution="1080P",
             # ),
         ]
 
@@ -436,7 +456,7 @@ if __name__ == "__main__":
 
                 fetch_tasks = [
                     image_to_video_fetch.arun(
-                        ImageToVideoFetchInput(task_id=task_id),
+                        ImageToVideoWan25FetchInput(task_id=task_id),
                     )
                     for task_id in remaining_task_ids
                 ]

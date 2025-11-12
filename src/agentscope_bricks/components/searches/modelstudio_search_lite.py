@@ -14,8 +14,8 @@ from agentscope_bricks.components.searches.modelstudio_search import (
     SEARCH_TIMEOUT,
     FieldValidator,
 )
+from agentscope_bricks.utils.tracing_utils import TracingUtil
 from agentscope_bricks.utils.tracing_utils.wrapper import trace
-from agentscope_bricks.utils.mcp_util import MCPUtil
 
 SEARCH_URL = os.getenv(
     "SEARCH_URL",
@@ -79,7 +79,7 @@ class ModelstudioSearchLite(Component[SearchLiteInput, SearchLiteOutput]):
     """
 
     description = "搜索可用于查询百科知识、时事新闻、天气等信息"
-    name = "modelstudio_web_search"
+    name = "bailian_web_search"
 
     @trace(trace_type="SEARCH", trace_name="modelstudio_search_lite")
     async def _arun(
@@ -106,7 +106,7 @@ class ModelstudioSearchLite(Component[SearchLiteInput, SearchLiteOutput]):
                 "please get your dashscope api-key on Modelstudio platform",
             )
         trace_event = kwargs.pop("trace_event", None)
-        request_id = MCPUtil._get_mcp_dash_request_id(args.ctx)
+        request_id = TracingUtil.get_request_id()
 
         # call search engine to get search result
         payload = ModelstudioSearchLite.generate_search_payload(

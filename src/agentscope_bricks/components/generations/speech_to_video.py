@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from agentscope_bricks.base.component import Component
 from agentscope_bricks.utils.tracing_utils.wrapper import trace
 from agentscope_bricks.utils.api_key_util import ApiNames, get_api_key
-from agentscope_bricks.utils.mcp_util import MCPUtil
+from agentscope_bricks.utils.tracing_utils import TracingUtil
 
 
 class SpeechToVideoInput(BaseModel):
@@ -173,7 +173,7 @@ class SpeechToVideo(Component[SpeechToVideoInput, SpeechToVideoOutput]):
             RuntimeError: If video generation fails
         """
         trace_event = kwargs.pop("trace_event", None)
-        request_id = MCPUtil._get_mcp_dash_request_id(args.ctx)
+        request_id = TracingUtil.get_request_id()
 
         try:
             api_key = get_api_key(ApiNames.dashscope_api_key, **kwargs)
@@ -198,8 +198,19 @@ class SpeechToVideo(Component[SpeechToVideoInput, SpeechToVideoOutput]):
             **parameters,
         )
 
+        if (
+            task_response.status_code != HTTPStatus.OK
+            or not task_response.output
+            or (
+                isinstance(task_response.output, dict)
+                and task_response.output.get("task_status", "UNKNOWN")
+                in ["FAILED", "CANCELED"]
+            )
+        ):
+            raise RuntimeError(f"Failed to submit task: {task_response}")
+
         # Poll for task completion using async methods
-        max_wait_time = 600  # 10 minutes timeout for video generation
+        max_wait_time = 15 * 60  # 10 minutes timeout for video generation
         poll_interval = 5  # 5 seconds polling interval
         start_time = time.time()
 
@@ -213,6 +224,17 @@ class SpeechToVideo(Component[SpeechToVideoInput, SpeechToVideoOutput]):
                 task=task_response,
             )
 
+            if (
+                res.status_code != HTTPStatus.OK
+                or not res.output
+                or (
+                    isinstance(res.output, dict)
+                    and res.output.get("task_status", "UNKNOWN")
+                    in ["FAILED", "CANCELED"]
+                )
+            ):
+                raise RuntimeError(f"Failed to fetch result: {res}")
+
             # Check task completion status
             if res.status_code == HTTPStatus.OK:
                 # res.output is a dict when using BaseAsyncAioApi
@@ -223,10 +245,7 @@ class SpeechToVideo(Component[SpeechToVideoInput, SpeechToVideoOutput]):
                     if res.output["task_status"] == "SUCCEEDED":
                         break
                     elif res.output["task_status"] in ["FAILED", "CANCELED"]:
-                        raise RuntimeError(
-                            f"Video generation failed: task_status="
-                            f"{res.output['task_status']}, response={res}",
-                        )
+                        raise RuntimeError(f"Failed to generate: {res}")
                     # Continue polling for PENDING, RUNNING, etc.
                 else:
                     # If no task_status field, assume completed

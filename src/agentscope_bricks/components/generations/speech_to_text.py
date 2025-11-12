@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from agentscope_bricks.base.component import Component
 from agentscope_bricks.utils.tracing_utils.wrapper import trace
 from agentscope_bricks.utils.api_key_util import ApiNames, get_api_key
-from agentscope_bricks.utils.mcp_util import MCPUtil
+from agentscope_bricks.utils.tracing_utils import TracingUtil
 
 
 class SpeechToTextInput(BaseModel):
@@ -98,7 +98,7 @@ class SpeechToText(Component[SpeechToTextInput, SpeechToTextOutput]):
             RuntimeError: If transcription fails
         """
         trace_event = kwargs.pop("trace_event", None)
-        request_id = MCPUtil._get_mcp_dash_request_id(args.ctx)
+        request_id = TracingUtil.get_request_id()
 
         try:
             api_key = get_api_key(ApiNames.dashscope_api_key, **kwargs)
@@ -123,6 +123,20 @@ class SpeechToText(Component[SpeechToTextInput, SpeechToTextOutput]):
             **parameters,
         )
 
+        if (
+            task.status_code != HTTPStatus.OK
+            or not task.output
+            or (
+                hasattr(task.output, "task_status")
+                and task.output.task_status
+                in [
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELED,
+                ]
+            )
+        ):
+            raise RuntimeError(f"Failed to submit task: {task}")
+
         # Poll for task completion
         max_wait_time = 300  # 5 minutes timeout for transcription
         poll_interval = 2  # 2 seconds polling interval
@@ -133,6 +147,20 @@ class SpeechToText(Component[SpeechToTextInput, SpeechToTextOutput]):
             while True:
                 # Fetch task result
                 results = Transcription.fetch(task.output.task_id)
+
+                if (
+                    results.status_code != HTTPStatus.OK
+                    or not results.output
+                    or (
+                        hasattr(results.output, "task_status")
+                        and results.output.task_status
+                        in [
+                            TaskStatus.FAILED,
+                            TaskStatus.CANCELED,
+                        ]
+                    )
+                ):
+                    raise RuntimeError(f"Failed to fetch result: {results}")
 
                 if results.status_code == HTTPStatus.OK:
                     if (
