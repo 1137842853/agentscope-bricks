@@ -255,6 +255,10 @@ python -m pip install aiohttp -i https://mirrors.aliyun.com/pypi/simple/
 python -m pip install asyncio -i https://mirrors.aliyun.com/pypi/simple/
 
 ```
+##### 1.2.2 云电脑临时图片存放文件夹创建
+
+c盘下 创建一个file文件夹
+
 #### 📱 1.3 云手机环境准备
 
 由于一些app对剪贴板有开启限制，导致文字输入指令无法生效（通过剪贴板实现），所以手机环境需要提前安装好 `ADBKeyboard.apk`。

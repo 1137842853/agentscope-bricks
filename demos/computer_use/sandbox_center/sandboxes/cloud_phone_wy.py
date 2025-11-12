@@ -163,7 +163,7 @@ class CloudPhone(SandboxBase):
         height: int = 0,
     ) -> str:
         self._ensure_initialized()
-        await self.instance_manager.tab__(x, y, x2, y2, width, height)
+        await self.instance_manager.tab(x, y, x2, y2, width, height)
         return f"The mouse has clicked  at ({x}, {y},{x2}, {y2})."
 
     async def right_click(
@@ -307,71 +307,6 @@ class CloudPhone(SandboxBase):
         )
 
         return new_url
-
-    async def operate(
-        self,
-        dummy_action: dict,
-    ) -> Tuple[Optional[str], Optional[Tuple[Any, ...]]]:
-        self._ensure_initialized()
-        print(dummy_action)
-        action_type = None
-        action_param = None
-        try:
-            content = dummy_action["arguments"]
-            if content["action"] == "click":
-                x = content["coordinate"][0]
-                y = content["coordinate"][1]
-                await self.instance_manager.tap(x, y)
-                action_type, action_param = "click", (x, y)
-
-            elif content["action"] == "long_press":
-                x = content["coordinate"][0]
-                y = content["coordinate"][1]
-                press_time = content["time"]
-                await self.instance_manager.long_press(x, y, press_time)
-                action_type, action_param = "long_press", (x, y, press_time)
-
-            elif content["action"] == "swipe":
-                x1 = content["coordinate"][0]
-                y1 = content["coordinate"][1]
-                x2 = content["coordinate2"][0]
-                y2 = content["coordinate2"][1]
-                await self.instance_manager.slide(x1, y1, x2, y2)
-                action_type = "swipe"
-                action_param = (x1, y1, x2, y2)
-
-            elif content["action"] == "type":
-                parameter = content["text"]
-                await self.instance_manager.type(parameter)
-                action_type, action_param = "Type", parameter
-
-            elif content["action"] == "system_button":
-                if content["button"] == "Back":
-                    await self.instance_manager.back()
-                    action_type = "Back"
-                if content["button"] == "Home":
-                    await self.instance_manager.home()
-                    action_type = "Home"
-                if content["button"] == "Menu":
-                    await self.instance_manager.menu()
-                    action_type = "Menu"
-                if content["button"] == "Enter":
-                    await self.instance_manager.enter()
-                    action_type = "Enter"
-
-            elif content["action"] == "terminate":
-                action_type = "Done"
-                action_param = content["status"]
-
-            # 📝 移除 phone_cache 相关调用
-            # self.instance_manager.phone_cache.send_heartbeat()
-
-        except Exception as e:
-            print("=" * 30)
-            print(e)
-            await self.instance_manager.kill_the_front_app()
-
-        return action_type, action_param
 
     async def clear(self) -> None:
         self._ensure_initialized()
@@ -719,13 +654,11 @@ class EdsClient:
             # print("------", next_token)
         return instances
 
-    async def restart_equipment(self, instance_id: str) -> None:
-        logger.info(f"[{instance_id}]: start to restart equipment")
+    async def restart_equipment(self, instance_ids: List[str]) -> None:
+        logger.info(f"{instance_ids}: start to restart equipment")
         reboot_android_instances_in_group_request = (
             eds_aic_20230930_models.RebootAndroidInstancesInGroupRequest(
-                android_instance_ids=[
-                    instance_id,
-                ],
+                android_instance_ids=instance_ids,
                 force_stop=True,
             )
         )
@@ -738,8 +671,8 @@ class EdsClient:
                 runtime,
             )
             logger.info(
-                f"[{instance_id}]: restart equipment ask api success,"
-                f" and wait finish",
+                "instance_ids: restart equipment ask api success,"
+                " and wait finish",
             )
             print(rsp)
         except Exception as error:
@@ -747,13 +680,36 @@ class EdsClient:
                 f"restart equipment failed:{error}",
             )
 
-    def stop_desktops(self, instance_id: str) -> int:
-        logger.info(f"[{instance_id}]: start to stop instance")
+    async def start_equipment(self, instance_ids: List[str]) -> int:
+        logger.info(f"{instance_ids}: start to start instance")
+        start_android_instance_request = (
+            eds_aic_20230930_models.StartAndroidInstanceRequest(
+                android_instance_ids=instance_ids,
+            )
+        )
+
+        runtime = util_models.RuntimeOptions()
+        try:
+            e_c = self.__client__
+            method = e_c.start_android_instance_with_options_async
+            rsp = await method(
+                start_android_instance_request,
+                runtime,
+            )
+            logger.info(
+                f"{instance_ids}: start instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
+        except Exception as error:
+            logger.error(f"start instance failed:{error}")
+        return 400
+
+    def stop_equipment(self, instance_ids: List[str]) -> int:
+        logger.info(f"{instance_ids}: start to stop instance")
         stop_android_instance_request = (
             eds_aic_20230930_models.StopAndroidInstanceRequest(
-                android_instance_ids=[
-                    instance_id,
-                ],
+                android_instance_ids=instance_ids,
             )
         )
 
@@ -764,21 +720,44 @@ class EdsClient:
                 runtime,
             )
             logger.info(
-                f"[{instance_id}]: stop instance ask api success,"
+                f"{instance_ids}: stop instance ask api success,"
                 f" and wait finish",
             )
             return rsp.status_code
         except Exception as error:
-            logger.error(f"stop_desktops failed:{error}")
+            logger.error(f"stop_equipment failed:{error}")
         return 400
 
-    async def reset_equipment(self, instance_id: str) -> int:
-        logger.info(f"[{instance_id}]: start to reset equipment")
+    async def stop_equipment_async(self, instance_ids: List[str]) -> int:
+        logger.info(f"{instance_ids}: start to stop instance")
+        stop_android_instance_request = (
+            eds_aic_20230930_models.StopAndroidInstanceRequest(
+                android_instance_ids=instance_ids,
+            )
+        )
+
+        runtime = util_models.RuntimeOptions()
+        try:
+            e_c = self.__client__
+            method = e_c.stop_android_instance_with_options_async
+            rsp = await method(
+                stop_android_instance_request,
+                runtime,
+            )
+            logger.info(
+                f"{instance_ids}: stop instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
+        except Exception as error:
+            logger.error(f"stop instance failed:{error}")
+        return 400
+
+    async def reset_equipment(self, instance_ids: List[str]) -> int:
+        logger.info(f"{instance_ids}: start to reset equipment")
         reset_android_instances_in_group_request = (
             eds_aic_20230930_models.ResetAndroidInstancesInGroupRequest(
-                android_instance_ids=[
-                    instance_id,
-                ],
+                android_instance_ids=instance_ids,
             )
         )
         runtime = util_models.RuntimeOptions()
@@ -790,7 +769,7 @@ class EdsClient:
                 runtime,
             )
             logger.info(
-                f"[{instance_id}]: reset equipment ask api success,"
+                f"{instance_ids}: reset equipment ask api success,"
                 f" and wait finish",
             )
             return rsp.status_code
@@ -798,13 +777,15 @@ class EdsClient:
             logger.error(f"reset_equipment failed:{error}")
         return 400
 
-    def rebuild_equipment_image(self, instance_id: str, image_id: str) -> int:
-        logger.info(f"[{instance_id}]: start to rebuild equipment image")
+    def rebuild_equipment_image(
+        self,
+        instance_ids: List[str],
+        image_id: str,
+    ) -> int:
+        logger.info(f"{instance_ids}: start to rebuild equipment image")
         update_instance_image_request = (
             eds_aic_20230930_models.UpdateInstanceImageRequest(
-                instance_id_list=[
-                    instance_id,
-                ],
+                instance_id_list=instance_ids,
                 image_id=image_id,
             )
         )
@@ -815,7 +796,7 @@ class EdsClient:
                 runtime,
             )
             logger.info(
-                f"[{instance_id}]: rebuild equipment image ask api "
+                f"{instance_ids}: rebuild equipment image ask api "
                 f"success, and wait finish",
             )
             return rsp.status_code
@@ -948,7 +929,7 @@ class EdsInstanceManager:
                 continue
         return ""
 
-    async def tab__(
+    async def tab(
         self,
         x1: int,
         y1: int,
@@ -963,26 +944,6 @@ class EdsInstanceManager:
         return await self.eds_client.run_command_with_wait(
             self.instance_id,
             f"input tap {input_x} {input_y}",
-        )
-
-    async def tab_(
-        self,
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-    ) -> tuple[bool, str | None]:
-        center_x = (x1 + x2) // 2
-        center_y = (y1 + y2) // 2
-        return await self.eds_client.run_command_with_wait(
-            self.instance_id,
-            f"input tap {center_x} {center_y}",
-        )
-
-    async def tap(self, x: int, y: int) -> tuple[bool, str | None]:
-        return await self.eds_client.run_command_with_wait(
-            self.instance_id,
-            f"input tap {x} {y}",
         )
 
     async def long_press(

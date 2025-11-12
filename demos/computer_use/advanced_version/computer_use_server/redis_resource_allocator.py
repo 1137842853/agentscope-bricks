@@ -6,10 +6,18 @@ Redis-based Resource Allocator for Multi-Instance Deployment
 import time
 import asyncio
 import uuid
+import os
 from typing import Tuple, List, Dict, Any, Optional
 import redis.asyncio as redis
 from agentscope_bricks.utils.logger_util import logger
 from enum import Enum, auto
+from sandbox_center.sandboxes.cloud_phone_wy import (
+    CloudPhone,
+)
+from sandbox_center.sandboxes.cloud_computer_wy import (
+    CloudComputer,
+)
+from fastapi import HTTPException
 
 
 class AllocationStatus(Enum):
@@ -180,7 +188,96 @@ class AsyncRedisResourceAllocator:
 
             # 清理分配记录
             await self._clear_allocation(user_id, instance_id)
-
+            # 休眠,重置设备
+            if self.resource_type == "phone":
+                logger.info(
+                    f"[{self.resource_type}] 休眠,重置设备: {instance_id}",
+                )
+                equipment = await asyncio.to_thread(
+                    CloudPhone,
+                    instance_id=instance_id,
+                )
+                await equipment.initialize()
+                e_client = equipment.instance_manager.eds_client
+                should_reset_image = os.environ.get("EQUIP_RESET", 1) == "1"
+                if should_reset_image:
+                    await self._wait_for_phone_ready(equipment, instance_id)
+                    # 重置实例镜像
+                    print(f"Equipment reset for user {user_id}")
+                    logger.info(f"Equipment reset for user {user_id}")
+                    method = e_client.reset_equipment
+                    status = await method([instance_id])
+                    if status != 200:
+                        raise HTTPException(
+                            503,
+                            "Failed to reset phone resource",
+                        )
+                else:
+                    logger.info(
+                        "跳过手机镜像重置: 同一会话重新激活或EQUIP_RESET未启用",
+                    )
+                await self._wait_for_phone_ready(
+                    equipment,
+                    instance_id,
+                    stability_check_duration=10,
+                )
+                # 停止设备
+                method = e_client.stop_equipment_async
+                status = await method(
+                    [instance_id],
+                )
+                if status != 200:
+                    raise HTTPException(
+                        503,
+                        "Failed to stop equipment resource",
+                    )
+            elif self.resource_type == "pc":
+                equipment = await asyncio.to_thread(
+                    CloudComputer,
+                    desktop_id=instance_id,
+                )
+                await equipment.initialize()
+                should_reset_image = os.environ.get("EQUIP_RESET", 1) == "1"
+                e_client = equipment.instance_manager.ecd_client
+                if should_reset_image:
+                    logger.info("查询设备状态")
+                    await self._wait_for_pc_ready(
+                        equipment,
+                        instance_id,
+                        stability_check_duration=2,
+                    )
+                    # 重置实例镜像
+                    print(f"Equipment reset for user {user_id}")
+                    logger.info(f"Equipment reset for user {user_id}")
+                    method = e_client.rebuild_equipment_image
+                    status = await method(
+                        instance_id,
+                        os.environ.get("ECD_IMAGE_ID"),
+                    )
+                    if status != 200:
+                        raise HTTPException(
+                            503,
+                            "Failed to reset computer resource",
+                        )
+                else:
+                    logger.info(
+                        "跳过镜像重置: 同一会话重新激活或EQUIP_RESET未启用 ",
+                    )
+                # 休眠设备
+                await self._wait_for_pc_ready(
+                    equipment,
+                    instance_id,
+                    stability_check_duration=2,
+                )
+                method = e_client.hibernate_desktops_async
+                status = await method(
+                    [instance_id],
+                )
+                if status != 200:
+                    raise HTTPException(
+                        503,
+                        "Failed to hibernate equipment resource",
+                    )
             # 将实例放回可用池
             await self.redis.sadd(self.FREE_INSTANCES_KEY, instance_id)
 
@@ -190,6 +287,213 @@ class AsyncRedisResourceAllocator:
             await self._notify_queued_users()
 
             return AllocationStatus.SUCCESS
+
+    async def _wait_for_phone_ready(
+        self,
+        equipment,
+        instance_id: str,
+        max_wait_time: int = 300,
+        stability_check_duration: int = 4,
+    ):
+        """异步等待手机设备就绪"""
+        start_time = time.time()
+        stable_start_time = None
+        while True:
+            try:
+                # 将同步的状态检查操作放到线程池中执行
+                total_count, next_token, devices_info = (
+                    await asyncio.to_thread(
+                        equipment.instance_manager.eds_client.list_instance,
+                        instance_ids=[instance_id],
+                    )
+                )
+
+                if (
+                    devices_info
+                    and devices_info[0].android_instance_status.lower()
+                    == "running"
+                ):
+                    # 第一次检测到运行状态，开始稳定性检查
+                    if stable_start_time is None:
+                        stable_start_time = time.time()
+                        print(
+                            f"Phone {instance_id} status: running, "
+                            "starting stability check...",
+                        )
+
+                    # 检查设备是否已稳定运行足够长时间
+                    stable_duration = time.time() - stable_start_time
+                    if stable_duration >= stability_check_duration:
+                        print(
+                            f"✓ Phone {instance_id} is stable and ready"
+                            f" (stable for {stable_duration:.1f}s)",
+                        )
+                        break
+                    else:
+                        print(
+                            f"Phone {instance_id} stability check: "
+                            f"{stable_duration:.1f}"
+                            f"s/{stability_check_duration}s",
+                        )
+                else:
+                    # 状态不是运行中，重置稳定性检查
+                    if stable_start_time is not None:
+                        print(
+                            f"PHONE {instance_id} status changed, "
+                            "resetting stability check",
+                        )
+                        stable_start_time = None
+                    current_status = (
+                        devices_info[0].android_instance_status.lower()
+                        if devices_info
+                        else "unknown"
+                    )
+                    print(
+                        f"PHONE {instance_id} status: "
+                        f"{current_status}, waiting...",
+                    )
+                    if (
+                        current_status == "stopped"
+                        or current_status == "unknown"
+                    ):
+                        # 开机
+                        print(
+                            f"Equipment restart for instance_id {instance_id}",
+                        )
+                        logger.info(
+                            f"Equipment restart for instance_id {instance_id}",
+                        )
+                        e_client = equipment.instance_manager.eds_client
+                        method = e_client.start_equipment
+                        status = await method(
+                            [instance_id],
+                        )
+                        if status != 200:
+                            raise HTTPException(
+                                503,
+                                "Failed to start computer resource",
+                            )
+
+                # 检查是否超时
+                if time.time() - start_time > max_wait_time:
+                    raise TimeoutError(
+                        f"Phone {instance_id} failed to become ready "
+                        f"within {max_wait_time} seconds",
+                    )
+
+            except Exception as e:
+                print(f"Error checking phone status for {instance_id}: {e}")
+
+            await asyncio.sleep(5)
+
+    async def _wait_for_pc_ready(
+        self,
+        equipment,
+        desktop_id: str,
+        max_wait_time: int = 300,
+        stability_check_duration: int = 10,
+    ):
+        """异步等待PC设备就绪，增加稳定性检查"""
+        start_time = time.time()
+        stable_start_time = None
+
+        while True:
+            try:
+                # 将同步的状态检查操作放到线程池中执行
+                pc_info = await asyncio.to_thread(
+                    equipment.instance_manager.ecd_client.search_desktop_info,
+                    [desktop_id],
+                )
+
+                if pc_info and pc_info[0].desktop_status.lower() == "running":
+                    # 第一次检测到运行状态，开始稳定性检查
+                    if stable_start_time is None:
+                        stable_start_time = time.time()
+                        print(
+                            f"PC {desktop_id} status: running, "
+                            "starting stability check...",
+                        )
+
+                    # 检查设备是否已稳定运行足够长时间
+                    stable_duration = time.time() - stable_start_time
+                    if stable_duration >= stability_check_duration:
+                        print(
+                            f"✓ PC {desktop_id} is stable and ready"
+                            f" (stable for {stable_duration:.1f}s)",
+                        )
+                        break
+                    else:
+                        print(
+                            f"PC {desktop_id} stability check: "
+                            f"{stable_duration:.1f}"
+                            f"s/{stability_check_duration}s",
+                        )
+                else:
+                    # 状态不是运行中，重置稳定性检查
+                    if stable_start_time is not None:
+                        print(
+                            f"PC {desktop_id} status changed, "
+                            "resetting stability check",
+                        )
+                        stable_start_time = None
+                    current_status = (
+                        pc_info[0].desktop_status.lower()
+                        if pc_info
+                        else "unknown"
+                    )
+                    print(
+                        f"PC {desktop_id} status: "
+                        f"{current_status}, waiting...",
+                    )
+                    if (
+                        current_status == "stopped"
+                        or current_status == "unknown"
+                    ):
+                        # 开机
+                        print(f"Equipment restart for desktop_id {desktop_id}")
+                        logger.info(
+                            f"Equipment restart for desktop_id {desktop_id}",
+                        )
+                        e_client = equipment.instance_manager.ecd_client
+                        method = e_client.start_desktops_async
+                        status = await method(
+                            [desktop_id],
+                        )
+                        if status != 200:
+                            raise HTTPException(
+                                503,
+                                "Failed to start computer resource",
+                            )
+                    elif current_status == "hibernated":
+                        # 唤醒
+                        print(f"Equipment wakeup for desktop_id {desktop_id}")
+                        logger.info(
+                            f"Equipment wakeup for desktop_id {desktop_id}",
+                        )
+                        e_client = equipment.instance_manager.ecd_client
+                        method = e_client.wakeup_desktops_async
+                        status = await method(
+                            [desktop_id],
+                        )
+                        if status != 200:
+                            raise HTTPException(
+                                503,
+                                "Failed to start computer resource",
+                            )
+
+                # 检查是否超时
+                if time.time() - start_time > max_wait_time:
+                    raise TimeoutError(
+                        f"PC {desktop_id} failed to become ready"
+                        f" within {max_wait_time} seconds",
+                    )
+
+            except Exception as e:
+                print(f"Error checking PC status for {desktop_id}: {e}")
+                # 出现异常时重置稳定性检查
+                stable_start_time = None
+
+            await asyncio.sleep(3)  # 减少检查间隔，更精确的监控
 
     async def get_chat_allocation_async(
         self,
@@ -286,13 +590,37 @@ class AsyncRedisResourceAllocator:
         await pipe.execute()
 
     async def _add_to_queue(self, user_id: str):
-        """添加到排队队列"""
-        pipe = self.redis.pipeline()
-        pipe.lpush(self.QUEUE_KEY, user_id)
-        pipe.hset(self.QUEUE_TIMESTAMPS_KEY, user_id, time.time())
-        pipe.expire(self.QUEUE_KEY, self.QUEUE_TTL)
-        pipe.expire(self.QUEUE_TIMESTAMPS_KEY, self.QUEUE_TTL)
-        await pipe.execute()
+        """将用户添加到队列中（兼容旧版Redis）"""
+        # 检查用户是否已经在队列中（兼容旧版Redis的实现）
+        queue_length = await self.redis.llen(self.QUEUE_KEY)
+        if queue_length > 0:
+            queue_items = await self.redis.lrange(self.QUEUE_KEY, 0, -1)
+            # 手动检查用户是否已在队列中
+            user_already_in_queue = False
+            for item in queue_items:
+                if isinstance(item, bytes) and item.decode("utf-8") == user_id:
+                    user_already_in_queue = True
+                    break
+                elif item == user_id:
+                    user_already_in_queue = True
+                    break
+
+            # 只有当用户不在队列中时才添加
+            if not user_already_in_queue:
+                pipe = self.redis.pipeline()
+                pipe.lpush(self.QUEUE_KEY, user_id)
+                pipe.hset(self.QUEUE_TIMESTAMPS_KEY, user_id, time.time())
+                pipe.expire(self.QUEUE_KEY, self.QUEUE_TTL)
+                pipe.expire(self.QUEUE_TIMESTAMPS_KEY, self.QUEUE_TTL)
+                await pipe.execute()
+        else:
+            # 队列为空，直接添加用户
+            pipe = self.redis.pipeline()
+            pipe.lpush(self.QUEUE_KEY, user_id)
+            pipe.hset(self.QUEUE_TIMESTAMPS_KEY, user_id, time.time())
+            pipe.expire(self.QUEUE_KEY, self.QUEUE_TTL)
+            pipe.expire(self.QUEUE_TIMESTAMPS_KEY, self.QUEUE_TTL)
+            await pipe.execute()
 
     async def _wait_for_resource(
         self,

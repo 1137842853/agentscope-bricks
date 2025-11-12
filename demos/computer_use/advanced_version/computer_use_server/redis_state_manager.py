@@ -31,7 +31,7 @@ from sandbox_center.sandboxes.cloud_computer_wy import (
 )
 
 # 心跳超时时间（秒）
-heartbeat_timeout = float(os.getenv("HEARTBEAT_TIMEOUT", 120))
+heartbeat_timeout = int(os.getenv("HEARTBEAT_TIMEOUT", 120))
 
 
 class EnvironmentOperationStatus(Enum):
@@ -687,7 +687,9 @@ class RedisStateManager:
                 # 添加资源释放和数据清理任务
                 cleanup_tasks.extend(
                     [
-                        self.release_user_resources(user_id),
+                        self.release_user_resources(
+                            self._composite_key(user_id, old_chat_id),
+                        ),
                         self.cleanup_chat_data(user_id, old_chat_id),
                     ],
                 )
@@ -1740,11 +1742,11 @@ class RedisStateManager:
                     f"[release_user_resources] 释放用户 {user_id} 的PC资源: "
                     f"{pc_instance_id}",
                 )
-                release_result = await self.pc_allocator.release_async(
-                    pc_instance_id,
+                asyncio.create_task(
+                    self.pc_allocator.release_async(pc_instance_id),
                 )
                 logger.info(
-                    f"[release_user_resources] PC资源释放结果: {release_result}",
+                    "[release_user_resources] 资源释开始",
                 )
                 released_resource_type = "pc_wuyin"
             else:
@@ -1772,11 +1774,11 @@ class RedisStateManager:
                     f"[release_user_resources] 释放用户 {user_id} 的手机资源: "
                     f"{phone_instance_id}",
                 )
-                release_result = await self.phone_allocator.release_async(
-                    phone_instance_id,
+                asyncio.create_task(
+                    self.phone_allocator.release_async(phone_instance_id),
                 )
                 logger.info(
-                    f"[release_user_resources] 手机资源释放结果: {release_result}",
+                    "[release_user_resources] 手机资源释开始",
                 )
                 released_resource_type = "phone_wuyin"
             else:
@@ -1847,7 +1849,9 @@ class RedisStateManager:
             await self.delete_equipment(user_id, chat_id)
 
         # 调用用户级别的资源释放
-        await self.release_user_resources(user_id)
+        await self.release_user_resources(
+            self._composite_key(user_id, chat_id),
+        )
 
         # 彻底清理对话数据，包括重置对话状态
         try:
@@ -2029,67 +2033,19 @@ class RedisStateManager:
                         )
                         que_ask = False
                         if not is_valid:
-                            activate_chat_id = await self.get_user_active_chat(
+                            # 2. 彻底清理用户当前对话的所有Redis资源
+                            await self._thorough_cleanup_u_res(
                                 user_id,
+                                chat_id,
                             )
-                            if not activate_chat_id:
-                                logger.info(
-                                    "当前用户没有活跃会话，可以进行彻底清理",
-                                )
-
-                                # 2. 彻底清理用户的所有Redis资源
-                                await self._thorough_cleanup_u_res(
-                                    user_id,
-                                    chat_id,
-                                )
-                                # 3. 清理内存心跳记录
-                                if composite_key in self.heartbeats:
-                                    del self.heartbeats[composite_key]
-                                que_ask = True
-                                logger.info(
-                                    f"[HeartbeatMonitor] 成功彻底清理用户资源"
-                                    f": {composite_key}",
-                                )
-
-                            else:
-                                logger.info(
-                                    "检测当前用户{user_id}活跃会话"
-                                    f"{activate_chat_id}是否心跳过期",
-                                )
-                                redis_heartbeat = await self.get_heartbeat(
-                                    user_id,
-                                    activate_chat_id,
-                                )
-
-                                # 修复后的代码
-                                if (
-                                    redis_heartbeat
-                                    and current_time - redis_heartbeat
-                                    > heartbeat_timeout
-                                ):
-                                    confirmed_expired.append(composite_key)
-                                    _time = current_time - redis_heartbeat
-                                    logger.warning(
-                                        "[HeartbeatMonitor] 确认用户"
-                                        f"{user_id}最新活跃会话心跳超时: 超时"
-                                        f"({_time:.1f}秒)",
-                                    )
-                                    await self._thorough_cleanup_u_res(
-                                        user_id,
-                                        chat_id,
-                                    )
-                                    # 3. 清理内存心跳记录
-                                    if composite_key in self.heartbeats:
-                                        del self.heartbeats[composite_key]
-                                    que_ask = True
-                                    logger.info(
-                                        "[HeartbeatMonitor] 成功彻底清理"
-                                        f"用户资源: {composite_key}",
-                                    )
-                                else:
-                                    logger.info(
-                                        "当前用户还有活跃会话，不兜底清除资源,清除取消",
-                                    )
+                            # 3. 清理内存心跳记录
+                            if composite_key in self.heartbeats:
+                                del self.heartbeats[composite_key]
+                            que_ask = True
+                            logger.info(
+                                f"[HeartbeatMonitor] 成功彻底清理用户资源"
+                                f": {composite_key}",
+                            )
                         else:
                             logger.info(
                                 f"检测当前用户{user_id}活跃会话{chat_id}是否心跳过期",
@@ -2115,6 +2071,7 @@ class RedisStateManager:
                                     user_id,
                                     chat_id,
                                 )
+
                                 # 3. 清理内存心跳记录
                                 if composite_key in self.heartbeats:
                                     del self.heartbeats[composite_key]
@@ -2149,7 +2106,7 @@ class RedisStateManager:
 
                             if pc_wait_status == AllocationStatus.SUCCESS:
                                 await self.pc_allocator.cancel_wait_async(
-                                    user_id,
+                                    composite_key,
                                 )
                                 logger.info(
                                     "[release_user_resources] 已取消用户"
@@ -2157,7 +2114,7 @@ class RedisStateManager:
                                 )
                             if phone_wait_status == AllocationStatus.SUCCESS:
                                 await self.phone_allocator.cancel_wait_async(
-                                    user_id,
+                                    composite_key,
                                 )
                                 logger.info(
                                     "[release_user_resources] 已取消"
@@ -2235,10 +2192,14 @@ class RedisStateManager:
             )
 
             # 1. 释放物理资源（PC和手机）
-            await self._cleanup_physical_resources(user_id)
+            await self._cleanup_physical_resources(
+                self._composite_key(user_id, chat_id),
+            )
 
             # 2. 清理资源分配器中的相关记录
-            await self._cleanup_allocator_records(user_id)
+            await self._cleanup_allocator_records(
+                self._composite_key(user_id, chat_id),
+            )
             # 3. 清理对话相关的所有Redis数据
             await self._cleanup_all_chat_data(user_id, chat_id)
 
@@ -2558,158 +2519,7 @@ class RedisStateManager:
     ):
         """执行环境初始化"""
         try:
-            # 检查用户是否已在同一chat_id中有活跃会话
-            current_active_chat = await self.get_user_active_chat(user_id)
-            is_same_session_reactivation = current_active_chat == chat_id
             # 判断对话是否过期，如果未过期，不需要重新激活
-            activate_flag = False
-            if current_active_chat:
-                current_time = time.time()
-                redis_heartbeat = await self.get_heartbeat(
-                    user_id,
-                    current_active_chat,
-                )
-                if (
-                    redis_heartbeat
-                    and current_time - redis_heartbeat < heartbeat_timeout
-                ):
-                    is_same_session_reactivation = True
-                    activate_flag = True
-
-            if is_same_session_reactivation:
-                # 检查是否已有设备且不需要重启
-                chat_id_for = chat_id
-                if activate_flag:
-                    logger.info(
-                        f"检测当前用户{user_id}活跃会话{current_active_chat}还未过期，无需重新激活",
-                    )
-                    chat_id_for = current_active_chat
-
-                chat_state = await self.get_chat_state(user_id, chat_id_for)
-                equipment_info = await self.get_equipment_info(
-                    user_id,
-                    chat_id_for,
-                )
-
-                if chat_state.get("equipment") or equipment_info:
-                    logger.info(
-                        f"用户 {user_id} 在 chat {chat_id_for} 已有设备，刷新认证信息后重用",
-                    )
-                    # 需要刷新认证信息，特别是auth_code等一次性凭证
-                    if equipment_info:
-                        static_url = config.get("static_url", "")
-                        sandbox_type = config.get("sandbox_type")
-                        task_id = str(uuid.uuid4())
-
-                        result = {"task_id": task_id}
-
-                        if sandbox_type == "pc_wuyin":
-                            # 刷新PC设备的auth_code
-                            try:
-                                app_stream_client = AppStreamClient()
-                                new_auth_code = (
-                                    await app_stream_client.search_auth_code()
-                                )
-
-                                # 更新设备信息中的auth_code
-                                equipment_info["instance_manager_info"][
-                                    "auth_code"
-                                ] = new_auth_code
-
-                                # 重新存储更新后的设备信息
-                                info_key = (
-                                    f"{self._equipment_key(user_id, chat_id)}"
-                                    f"_info"
-                                )
-                                await self.redis_client.setex(
-                                    info_key,
-                                    self.EQUIPMENT_TTL,
-                                    json.dumps(equipment_info, default=str),
-                                )
-
-                                logger.info(
-                                    f"已刷新PC设备的auth_code: "
-                                    f"{new_auth_code[:20]}...",
-                                )
-
-                                result.update(
-                                    {
-                                        "equipment_web_url": f"{static_url}"
-                                        f"equipment_computer.html",
-                                        "equipment_web_sdk_info": {
-                                            "auth_code": new_auth_code,
-                                            "desktop_id": equipment_info[
-                                                "instance_manager_info"
-                                            ]["desktop_id"],
-                                            "static_url": static_url,
-                                        },
-                                    },
-                                )
-                            except Exception as e:
-                                logger.error(f"刷新PC设备auth_code失败: {e}")
-                                # 如果刷新失败，使用旧的auth_code（可能会失败，但至少保持向后兼容）
-                                result.update(
-                                    {
-                                        "equipment_web_url": f"{static_url}"
-                                        f"equipment_computer.html",
-                                        "equipment_web_sdk_info": {
-                                            "auth_code": equipment_info[
-                                                "instance_manager_info"
-                                            ]["auth_code"],
-                                            "desktop_id": equipment_info[
-                                                "instance_manager_info"
-                                            ]["desktop_id"],
-                                            "static_url": static_url,
-                                        },
-                                    },
-                                )
-
-                        elif sandbox_type == "phone_wuyin":
-                            # 手机设备的ticket通常有更长的有效期，但也可以考虑刷新
-                            result.update(
-                                {
-                                    "equipment_web_url": f"{static_url}"
-                                    f"equipment_phone.html",
-                                    "equipment_web_sdk_info": {
-                                        "ticket": equipment_info[
-                                            "instance_manager_info"
-                                        ]["ticket"],
-                                        "person_app_id": equipment_info[
-                                            "instance_manager_info"
-                                        ]["person_app_id"],
-                                        "app_instance_id": equipment_info[
-                                            "instance_manager_info"
-                                        ]["instance_id"],
-                                        "static_url": static_url,
-                                    },
-                                },
-                            )
-
-                        # 标记操作完成
-                        await self.update_environment_operation(
-                            user_id,
-                            chat_id,
-                            operation_id,
-                            {
-                                "status": "completed",
-                                "message": "环境已存在，已刷新认证信息",
-                                "progress": 100,
-                                "end_time": time.time(),
-                                "result": result,
-                            },
-                        )
-
-                        await self._notify_operation_progress(
-                            user_id,
-                            chat_id,
-                            operation_id,
-                        )
-                        return
-
-            # 如果是不同的chat_id或没有现有设备，清理旧会话
-            # 注意：这里直接清理，因为是环境初始化操作
-            await self.cleanup_user_old_sessions(user_id, chat_id)
-
             operation = await self.get_environment_operation(
                 user_id,
                 chat_id,
@@ -2735,8 +2545,6 @@ class RedisStateManager:
                 chat_id,
                 config,
                 restart_device=True,
-                is_session_switch=is_same_session_reactivation,
-                # 传递是否为同一会话重新激活的标志
             )
 
             # 初始化成功
@@ -2937,7 +2745,9 @@ class RedisStateManager:
                     f"已完全清理用户 {user_id} 对话 {chat_id} 的设备信息",
                 )
             # 调用用户级别的资源释放（释放物理资源）
-            await self.release_user_resources(user_id)
+            await self.release_user_resources(
+                self._composite_key(user_id, chat_id),
+            )
 
             # 3. 初始化新环境
             await self.update_environment_operation(
@@ -2955,7 +2765,6 @@ class RedisStateManager:
                 chat_id,
                 config,
                 restart_device=True,
-                is_session_switch=True,  # 标识为会话内设备切换
             )
 
             # 切换成功
@@ -3211,7 +3020,6 @@ class RedisStateManager:
                 chat_id,
                 config,
                 restart_device=True,
-                is_session_switch=False,  # 重试环境初始化不是会话内切换
             )
 
             # 初始化成功
@@ -3310,7 +3118,9 @@ class RedisStateManager:
                     f"重试切换-已完全清理用户 {user_id} 对话 {chat_id} 的设备信息",
                 )
             # 调用用户级别的资源释放（释放物理资源）
-            await self.release_user_resources(user_id)
+            await self.release_user_resources(
+                self._composite_key(user_id, chat_id),
+            )
 
             # 初始化新环境
             result = await self._init_equipment_async(
@@ -3318,7 +3128,6 @@ class RedisStateManager:
                 chat_id,
                 config,
                 restart_device=True,
-                is_session_switch=True,  # 标识为会话内设备切换
             )
 
             # 切换成功
@@ -3413,7 +3222,6 @@ class RedisStateManager:
         chat_id: str,
         config: dict,
         restart_device: bool = False,
-        is_session_switch: bool = False,  # 标识是否为会话内设备切换
     ):
         """异步设备初始化函数"""
         sandbox_type = config.get("sandbox_type")
@@ -3533,7 +3341,7 @@ class RedisStateManager:
             desktop_id, status, queue_info = (
                 await self.allocate_resource_with_queue_info(
                     "pc",
-                    user_id,
+                    self._composite_key(user_id, chat_id),
                     timeout=0,
                 )
             )
@@ -3632,53 +3440,31 @@ class RedisStateManager:
 
             # 只有在需要重启时才重启设备
             time_reset = time.time()
-            if restart_device:
-                # 检查是否需要重置镜像：只有在环境初始化或设备切换时才重置，同一会话重新激活时跳过
-                should_reset_image = (
-                    not is_session_switch
-                    and os.environ.get("EQUIP_RESET", 1) == "1"
-                )
-
-                if should_reset_image:
-                    logger.info("查询设备状态")
-                    await self._wait_for_pc_ready(
-                        equipment,
-                        desktop_id,
-                        stability_check_duration=2,
-                    )
-                    # 重置实例镜像
-                    print(f"Equipment reset for user {chat_id}")
-                    logger.info(f"Equipment reset for user {chat_id}")
-                    e_client = equipment.instance_manager.ecd_client
-                    method = e_client.rebuild_equipment_image
-                    status = await method(
-                        desktop_id,
-                        os.environ.get("ECD_IMAGE_ID"),
-                    )
-                    if status != 200:
-                        raise HTTPException(
-                            503,
-                            "Failed to reset computer resource",
-                        )
-                else:
-                    logger.info(
-                        f"跳过镜像重置: 同一会话重新激活或EQUIP_RESET未启用 "
-                        f"(is_session_switch={is_session_switch})",
-                    )
-
-                # 等待PC就绪
-                await self._wait_for_pc_ready(
-                    equipment,
-                    desktop_id,
-                    stability_check_duration=2,
-                )
-
-            print(
-                "Total reset and setup time: "
-                f"{time.time() - time_reset:.1f}s",
+            # 等待PC就绪
+            start_satus = await self._wait_for_pc_ready(
+                equipment,
+                desktop_id,
+                stability_check_duration=2,
             )
+            if start_satus == 1:
+                # 设备开机，刷新设备数据，ticket之类的
+                logger.info(
+                    f"old auth_code:{equipment.instance_manager.auth_code}",
+                )
+                logger.info(
+                    f"Start Equipment refresh instance_id {desktop_id}",
+                )
+                equipment = await asyncio.to_thread(
+                    CloudComputer,
+                    desktop_id=desktop_id,
+                )
+                await equipment.initialize()
+                logger.info(
+                    f"new auth_code:{equipment.instance_manager.auth_code}",
+                )
+
             logger.info(
-                "Total reset and setup time: "
+                "Total start equipment time: "
                 f"{time.time() - time_reset:.1f}s",
             )
 
@@ -3713,7 +3499,7 @@ class RedisStateManager:
             instance_id, status, queue_info = (
                 await self.allocate_resource_with_queue_info(
                     "phone",
-                    user_id,
+                    self._composite_key(user_id, chat_id),
                     timeout=0,
                 )
             )
@@ -3814,36 +3600,30 @@ class RedisStateManager:
                 )
 
             time_reset = time.time()
-            if restart_device:
-                # 检查是否需要重置镜像：只有在环境初始化或设备切换时才重置，同一会话重新激活时跳过
-                should_reset_image = (
-                    not is_session_switch
-                    and os.environ.get("EQUIP_RESET", 1) == "1"
+
+            # 等待设备就绪 - 异步轮询
+            start_satus = await self._wait_for_phone_ready(
+                equipment,
+                instance_id,
+            )
+            if start_satus == 1:
+                # 设备开机，刷新设备数据，ticket之类的
+                logger.info(f"old ticket:{equipment.instance_manager.ticket}")
+
+                logger.info(
+                    f"Start Equipment refresh instance_id {instance_id}",
                 )
+                equipment = await asyncio.to_thread(
+                    CloudPhone,
+                    instance_id=instance_id,
+                )
+                await equipment.initialize()
+                logger.info(f"new ticket:{equipment.instance_manager.ticket}")
 
-                if should_reset_image:
-                    await self._wait_for_phone_ready(equipment, instance_id)
-                    # 重置实例镜像
-                    print(f"Equipment reset for user {chat_id}")
-                    logger.info(f"Equipment reset for user {chat_id}")
-                    e_client = equipment.instance_manager.eds_client
-                    method = e_client.reset_equipment
-                    status = await method(instance_id)
-                    if status != 200:
-                        raise HTTPException(
-                            503,
-                            "Failed to reset phone resource",
-                        )
-                else:
-                    logger.info(
-                        "跳过手机镜像重置: 同一会话重新激活或EQUIP_RESET未启用"
-                        f" (is_session_switch={is_session_switch})",
-                    )
-
-                # 等待设备就绪 - 异步轮询
-                await self._wait_for_phone_ready(equipment, instance_id)
-            print(f"启动time_reset: {time.time() - time_reset}")
-
+            logger.info(
+                "Total start equipment time: "
+                f"{time.time() - time_reset:.1f}s",
+            )
             # 存储设备到Redis
             await self.store_equipment(user_id, chat_id, equipment)
 
@@ -3900,11 +3680,11 @@ class RedisStateManager:
         desktop_id: str,
         max_wait_time: int = 300,
         stability_check_duration: int = 10,
-    ):
+    ) -> int:
         """异步等待PC设备就绪，增加稳定性检查"""
         start_time = time.time()
         stable_start_time = None
-
+        start_equipment_flag = False
         while True:
             try:
                 # 将同步的状态检查操作放到线程池中执行
@@ -3929,7 +3709,11 @@ class RedisStateManager:
                             f"✓ PC {desktop_id} is stable and ready"
                             f" (stable for {stable_duration:.1f}s)",
                         )
-                        break
+                        if start_equipment_flag:
+                            # 设备开机，刷新设备数据，ticket之类的
+                            return 1
+                        else:
+                            return 0
                     else:
                         print(
                             f"PC {desktop_id} stability check: "
@@ -3953,6 +3737,42 @@ class RedisStateManager:
                         f"PC {desktop_id} status: "
                         f"{current_status}, waiting...",
                     )
+                    if (
+                        current_status == "stopped"
+                        or current_status == "unknown"
+                    ):
+                        # 开机
+                        print(f"Equipment restart for desktop_id {desktop_id}")
+                        logger.info(
+                            f"Equipment restart for desktop_id {desktop_id}",
+                        )
+                        e_client = equipment.instance_manager.ecd_client
+                        method = e_client.start_desktops_async
+                        status = await method(
+                            [desktop_id],
+                        )
+                        if status != 200:
+                            raise HTTPException(
+                                503,
+                                "Failed to start computer resource",
+                            )
+                        start_equipment_flag = True
+                    elif current_status == "hibernated":
+                        # 唤醒
+                        print(f"Equipment wakeup for desktop_id {desktop_id}")
+                        logger.info(
+                            f"Equipment wakeup for desktop_id {desktop_id}",
+                        )
+                        e_client = equipment.instance_manager.ecd_client
+                        method = e_client.wakeup_desktops_async
+                        status = await method(
+                            [desktop_id],
+                        )
+                        if status != 200:
+                            raise HTTPException(
+                                503,
+                                "Failed to start computer resource",
+                            )
 
                 # 检查是否超时
                 if time.time() - start_time > max_wait_time:
@@ -3973,9 +3793,12 @@ class RedisStateManager:
         equipment,
         instance_id: str,
         max_wait_time: int = 300,
-    ):
+        stability_check_duration: int = 4,
+    ) -> int:
         """异步等待手机设备就绪"""
         start_time = time.time()
+        stable_start_time = None
+        start_equipment_flag = False
         while True:
             try:
                 # 将同步的状态检查操作放到线程池中执行
@@ -3991,10 +3814,73 @@ class RedisStateManager:
                     and devices_info[0].android_instance_status.lower()
                     == "running"
                 ):
-                    print(f"Phone {instance_id} is now ready")
-                    break
+                    # 第一次检测到运行状态，开始稳定性检查
+                    if stable_start_time is None:
+                        stable_start_time = time.time()
+                        print(
+                            f"Phone {instance_id} status: running, "
+                            "starting stability check...",
+                        )
 
-                # 检查是否超时
+                    # 检查设备是否已稳定运行足够长时间
+                    stable_duration = time.time() - stable_start_time
+                    if stable_duration >= stability_check_duration:
+                        print(
+                            f"✓ Phone {instance_id} is stable and ready"
+                            f" (stable for {stable_duration:.1f}s)",
+                        )
+                        if start_equipment_flag:
+                            # 设备开机，刷新设备数据，ticket之类的
+                            return 1
+                        else:
+                            return 0
+                    else:
+                        print(
+                            f"Phone {instance_id} stability check: "
+                            f"{stable_duration:.1f}"
+                            f"s/{stability_check_duration}s",
+                        )
+                else:
+                    # 状态不是运行中，重置稳定性检查
+                    if stable_start_time is not None:
+                        print(
+                            f"PHONE {instance_id} status changed, "
+                            "resetting stability check",
+                        )
+                        stable_start_time = None
+                    current_status = (
+                        devices_info[0].android_instance_status.lower()
+                        if devices_info
+                        else "unknown"
+                    )
+                    print(
+                        f"PHONE {instance_id} status: "
+                        f"{current_status}, waiting...",
+                    )
+                    if (
+                        current_status == "stopped"
+                        or current_status == "unknown"
+                    ):
+                        # 开机
+                        print(
+                            f"Equipment restart for instance_id {instance_id}",
+                        )
+                        logger.info(
+                            f"Equipment restart for instance_id {instance_id}",
+                        )
+                        e_client = equipment.instance_manager.eds_client
+                        method = e_client.start_equipment
+                        status = await method(
+                            [instance_id],
+                        )
+                        if status != 200:
+                            raise HTTPException(
+                                503,
+                                "Failed to start computer resource",
+                            )
+                        start_equipment_flag = True
+
+                        # 检查是否超时
                 if time.time() - start_time > max_wait_time:
                     raise TimeoutError(
                         f"Phone {instance_id} failed to become ready "

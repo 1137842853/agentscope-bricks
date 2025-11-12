@@ -1714,7 +1714,7 @@ class ComputerUseAgent(Agent):
                         int(coordinate[2]),
                         int(coordinate[3]),
                     )
-                    await equipment.tab__(x1, y1, x2, y2, width, height)
+                    await equipment.tab(x1, y1, x2, y2, width, height)
                 elif "Swipe down" in operation:
                     x1, y1 = int(width * screen_size / 2), int(
                         height * screen_size / 3,

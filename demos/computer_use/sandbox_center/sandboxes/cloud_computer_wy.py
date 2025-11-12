@@ -636,7 +636,7 @@ class EcdClient:
             logger.error(f"search wuying desktop failed:{error}")
             return []
 
-    def start_desktops(self, desktop_ids: List[str]) -> None:
+    def start_desktops(self, desktop_ids: List[str]) -> int:
         start_desktops_request = ecd_20200930_models.StartDesktopsRequest(
             region_id=os.environ.get("ECD_ALIBABA_CLOUD_REGION_ID"),
             desktop_id=desktop_ids,
@@ -644,28 +644,65 @@ class EcdClient:
 
         runtime = util_models.RuntimeOptions()
         try:
-            self.__client__.start_desktops_with_options(
+            e_c = self.__client__
+            rsp = e_c.start_desktops_with_options(
                 start_desktops_request,
                 runtime,
             )
+            logger.info(
+                f"[{desktop_ids}]: start instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
         except Exception as error:
             logger.error(f"start_desktops failed:{error}")
+            return 400
 
-    def wakeup_desktops(self, desktop_ids: List[str]) -> None:
+    async def start_desktops_async(self, desktop_ids: List[str]) -> int:
+        start_desktops_request = ecd_20200930_models.StartDesktopsRequest(
+            region_id=os.environ.get("ECD_ALIBABA_CLOUD_REGION_ID"),
+            desktop_id=desktop_ids,
+        )
+
+        runtime = util_models.RuntimeOptions()
+        try:
+            e_c = self.__client__
+            method = e_c.start_desktops_with_options_async
+            rsp = await method(
+                start_desktops_request,
+                runtime,
+            )
+            logger.info(
+                f"[{desktop_ids}]: start instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
+        except Exception as error:
+            logger.error(f"start_desktops failed:{error}")
+            return 400
+
+    def wakeup_desktops(self, desktop_ids: List[str]) -> int:
         wakeup_desktops_request = ecd_20200930_models.WakeupDesktopsRequest(
             region_id=os.environ.get("ECD_ALIBABA_CLOUD_REGION_ID"),
             desktop_id=desktop_ids,
         )
         runtime = util_models.RuntimeOptions()
         try:
-            self.__client__.wakeup_desktops_with_options(
+            e_c = self.__client__
+            rsp = e_c.wakeup_desktops_with_options(
                 wakeup_desktops_request,
                 runtime,
             )
+            logger.info(
+                f"[{desktop_ids}]: wakeup instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
         except Exception as error:
             logger.error(f"wakeup_desktops failed:{error}")
+            return 400
 
-    def hibernate_desktops(self, desktop_ids: List[str]) -> None:
+    def hibernate_desktops(self, desktop_ids: List[str]) -> int:
         hibernate_desktops_request = (
             ecd_20200930_models.HibernateDesktopsRequest(
                 region_id=os.environ.get("ECD_ALIBABA_CLOUD_REGION_ID"),
@@ -674,12 +711,65 @@ class EcdClient:
         )
         runtime = util_models.RuntimeOptions()
         try:
-            self.__client__.hibernate_desktops_with_options(
+            e_c = self.__client__
+            rsp = e_c.hibernate_desktops_with_options(
                 hibernate_desktops_request,
                 runtime,
             )
+            logger.info(
+                f"[{desktop_ids}]: hibernate instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
         except Exception as error:
             logger.error(f"hibernate_desktops failed:{error}")
+            return 400
+
+    async def wakeup_desktops_async(self, desktop_ids: List[str]) -> int:
+        wakeup_desktops_request = ecd_20200930_models.WakeupDesktopsRequest(
+            region_id=os.environ.get("ECD_ALIBABA_CLOUD_REGION_ID"),
+            desktop_id=desktop_ids,
+        )
+        runtime = util_models.RuntimeOptions()
+        try:
+            e_c = self.__client__
+            method = e_c.wakeup_desktops_with_options_async
+            rsp = await method(
+                wakeup_desktops_request,
+                runtime,
+            )
+            logger.info(
+                f"[{desktop_ids}]: wakeup instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
+        except Exception as error:
+            logger.error(f"wakeup_desktops failed:{error}")
+            return 400
+
+    async def hibernate_desktops_async(self, desktop_ids: List[str]) -> int:
+        hibernate_desktops_request = (
+            ecd_20200930_models.HibernateDesktopsRequest(
+                region_id=os.environ.get("ECD_ALIBABA_CLOUD_REGION_ID"),
+                desktop_id=desktop_ids,
+            )
+        )
+        runtime = util_models.RuntimeOptions()
+        try:
+            e_c = self.__client__
+            method = e_c.hibernate_desktops_with_options_async
+            rsp = await method(
+                hibernate_desktops_request,
+                runtime,
+            )
+            logger.info(
+                f"[{desktop_ids}]: wakeup instance ask api success,"
+                f" and wait finish",
+            )
+            return rsp.status_code
+        except Exception as error:
+            logger.error(f"hibernate_desktops failed:{error}")
+            return 400
 
     async def restart_equipment(self, desktop_id: str) -> int:
         reboot_desktops_request = ecd_20200930_models.RebootDesktopsRequest(
@@ -708,6 +798,29 @@ class EcdClient:
             rsp = self.__client__.stop_desktops_with_options(
                 stop_desktops_request,
                 runtime,
+            )
+            return rsp.status_code
+        except Exception as error:
+            logger.error(f"stop_desktops failed:{error}")
+        return 400
+
+    async def stop_desktops_async(self, desktop_ids: List[str]) -> int:
+        stop_desktops_request = ecd_20200930_models.StopDesktopsRequest(
+            region_id=os.environ.get("ECD_ALIBABA_CLOUD_REGION_ID"),
+            desktop_id=desktop_ids,
+        )
+
+        runtime = util_models.RuntimeOptions()
+        try:
+            e_c = self.__client__
+            method = e_c.stop_desktops_with_options_async
+            rsp = await method(
+                stop_desktops_request,
+                runtime,
+            )
+            logger.info(
+                f"[{desktop_ids}]: wakeup instance ask api success,"
+                f" and wait finish",
             )
             return rsp.status_code
         except Exception as error:
@@ -1376,205 +1489,6 @@ pyautogui.press('enter')
 
         return await self.run_command_power_shell(command)
 
-    async def logoff(self, desktop_id: str) -> Tuple[str, str]:
-        """
-        完整的Windows注销操作，包括清除保存的凭据、浏览器数据、Windows凭证和账号历史记录
-        """
-        import base64
-
-        script = """
-import subprocess
-import os
-import shutil
-import json
-
-try:
-    # 清除Chrome浏览器保存的登录数据
-    chrome_user_data_path = os.path.join(os.environ['USERPROFILE'],
-                                         'AppData', 'Local', 'Google',
-                                         'Chrome', 'User Data')
-    if os.path.exists(chrome_user_data_path):
-        try:
-            # 删除默认用户配置文件夹（包含cookies、缓存、登录数据等）
-            default_profile_path = os.path.join(chrome_user_data_path,
-                                                'Default')
-            if os.path.exists(default_profile_path):
-                shutil.rmtree(default_profile_path)
-                print("Chrome default profile data deleted")
-        except Exception as e:
-            print("Failed to delete Chrome default profile: {}".format(e))
-
-        try:
-            # 删除所有用户配置文件夹
-            for item in os.listdir(chrome_user_data_path):
-                if item.startswith('Profile'):
-                    profile_path = os.path.join(chrome_user_data_path, item)
-                    if os.path.exists(profile_path):
-                        shutil.rmtree(profile_path)
-                        print("Chrome {} data deleted".format(item))
-        except Exception as e:
-            print("Failed to delete Chrome profiles: {}".format(e))
-
-    # 清除Edge浏览器保存的登录数据
-    edge_user_data_path = os.path.join(os.environ['USERPROFILE'],
-                                       'AppData', 'Local', 'Microsoft',
-                                       'Edge', 'User Data')
-    if os.path.exists(edge_user_data_path):
-        try:
-            # 删除默认用户配置文件夹
-            default_profile_path = os.path.join(edge_user_data_path,
-                                                'Default')
-            if os.path.exists(default_profile_path):
-                shutil.rmtree(default_profile_path)
-                print("Edge default profile data deleted")
-        except Exception as e:
-            print("Failed to delete Edge default profile: {}".format(e))
-
-        try:
-            # 删除所有用户配置文件夹
-            for item in os.listdir(edge_user_data_path):
-                if item.startswith('Profile'):
-                    profile_path = os.path.join(edge_user_data_path, item)
-                    if os.path.exists(profile_path):
-                        shutil.rmtree(profile_path)
-                        print("Edge {} data deleted".format(item))
-        except Exception as e:
-            print("Failed to delete Edge profiles: {}".format(e))
-
-        # 清除Edge的用户数据根目录下的账号信息文件
-        try:
-            for file_name in ['Login Data', 'Web Data',
-                              'Preferences', 'Accounts']:
-                file_path = os.path.join(edge_user_data_path, file_name)
-                if os.path.exists(file_path):
-                    if os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                    else:
-                        os.remove(file_path)
-                    print("Edge {} file/folder deleted".format(file_name))
-        except Exception as e:
-            print("Failed to delete Edge data files: {}".format(e))
-
-        # 清除Edge的Local State文件中的账号信息
-        try:
-            local_state_path = os.path.join(edge_user_data_path,
-                                            'Local State')
-            if os.path.exists(local_state_path):
-                with open(local_state_path, 'r') as f:
-                    local_state_data = json.load(f)
-
-                # 清除账号相关信息
-                if 'account_info' in local_state_data:
-                    local_state_data['account_info'] = {}
-                if 'google_services' in local_state_data:
-                    local_state_data['google_services'] = {}
-                if 'sync' in local_state_data:
-                    local_state_data['sync'] = {}
-
-                with open(local_state_path, 'w') as f:
-                    json.dump(local_state_data, f)
-                print("Edge Local State account info cleared")
-        except Exception as e:
-            print("Failed to clear Edge Local State account info: {}"
-                  .format(e))
-
-    # 清除Windows凭证管理器中的浏览器相关凭证
-    try:
-        # 清除Microsoft Edge相关凭证
-        subprocess.run(['cmdkey',
-                        '/delete:MicrosoftAccount:target=SSO_POP_User:{{*}}'],
-                       capture_output=True)
-        subprocess.run(['cmdkey',
-                        '/delete:MicrosoftAccount:target=SSO_POP_Token:{{*}}'],
-                       capture_output=True)
-
-        # 清除通用Windows凭据
-        subprocess.run(['cmdkey', '/delete:TERMSRV/*'],
-                       capture_output=True)
-
-        # 清除所有MicrosoftAccount相关的凭证
-        result = subprocess.run(['cmdkey', '/list'],
-                                capture_output=True, text=True)
-        if result.stdout:
-            lines = result.stdout.split('\\n')
-            for line in lines:
-                if ('MicrosoftAccount:' in line or
-                    'LegacyGeneric:target=MicrosoftAccount:user=' in line):
-                    # 提取目标名称
-                    if 'target=' in line:
-                        target_start = line.find('target=') + 7
-                        target_end = line.find(' ', target_start)
-                        if target_end == -1:
-                            target = line[target_start:]
-                        else:
-                            target = line[target_start:target_end]
-                        subprocess.run(['cmdkey',
-                                        '/delete:{}'.format(target.strip())],
-                                       capture_output=True)
-                        print("Deleted credential: {}".format(target.strip()))
-    except Exception as e:
-        print("Failed to clear Windows credentials: {}".format(e))
-
-    # 清除Windows WebCache（可能包含浏览器访问记录）
-    try:
-        webcache_path = os.path.join(os.environ['USERPROFILE'],
-                                     'AppData', 'Local', 'Microsoft',
-                                     'Windows', 'WebCache')
-        if os.path.exists(webcache_path):
-            shutil.rmtree(webcache_path)
-            print("WebCache deleted")
-    except Exception as e:
-        print("Failed to delete WebCache: {}".format(e))
-
-    # 清除Windows账号历史记录
-    try:
-        # 清除最近使用的用户信息
-        ntuser_dat_path = os.path.join(os.environ['USERPROFILE'],
-                                       'NTUSER.DAT')
-        # 注意：直接修改NTUSER.DAT比较危险，这里我们尝试清理其他相关文件
-
-        # 清理最近访问的用户信息
-        recent_users_path = os.path.join(os.environ['USERPROFILE'],
-                                         'AppData', 'Roaming', 'Microsoft',
-                                         'Windows', 'Recent',
-                                         'AutomaticDestinations')
-        if os.path.exists(recent_users_path):
-            shutil.rmtree(recent_users_path)
-            os.makedirs(recent_users_path)
-            print("Recent users data cleared")
-    except Exception as e:
-        print("Failed to clear recent users data: {}".format(e))
-
-    # 强制注销当前用户会话
-    result = subprocess.run(['shutdown', '/l', '/f'],
-                            capture_output=True, text=True)
-    print("Complete logoff executed. Return code: {}"
-      .format(result.returncode))
-    if result.stderr:
-        print("Logoff stderr: {}".format(result.stderr))
-    if result.stdout:
-        print("Logoff stdout: {}".format(result.stdout))
-except Exception as e:
-    print("Failed to execute complete logoff: {}".format(e))
-"""
-
-        # 将脚本编码为base64，避免引号和特殊字符问题
-        script_bytes = script.encode("utf-8")
-        base64_script = base64.b64encode(script_bytes).decode("ascii")
-
-        # 使用base64解码方式执行Python脚本
-        full_python_command = (
-            f'\npython -c "import base64; exec(base64.b64decode'
-            f"('{base64_script}').decode('utf-8'))\""
-        )
-
-        command = (
-            f'$env:Path += ";C:\\Program Files\\Python310"'
-            f"{full_python_command}"
-        )
-
-        return self.ecd_client.run_command_with_wait(desktop_id, command)
-
     async def mouse_move(self, x: int, y: int) -> Tuple[str, str]:
         script = f"""
 import pyautogui
@@ -1743,85 +1657,6 @@ print('scroll')
             f"{full_python_command}"
         )
 
-        return await self.run_command_power_shell(command)
-
-    async def set_resolution(self, width: int, height: int) -> Tuple[str, str]:
-        script = f"""
-import subprocess
-import sys
-
-def set_screen_resolution(width, height):
-  try:
-      # 使用 Windows API 设置分辨率
-      import ctypes
-      from ctypes import wintypes
-
-      user32 = ctypes.windll.user32
-
-      # 定义 DEVMODE 结构体
-      class DEVMODE(ctypes.Structure):
-          _fields_ = [
-              ('dmDeviceName', ctypes.c_wchar * 32),
-              ('dmSpecVersion', wintypes.WORD),
-              ('dmDriverVersion', wintypes.WORD),
-              ('dmSize', wintypes.WORD),
-              ('dmDriverExtra', wintypes.WORD),
-              ('dmFields', wintypes.DWORD),
-              ('dmOrientation', ctypes.c_short),
-              ('dmPaperSize', ctypes.c_short),
-              ('dmPaperLength', ctypes.c_short),
-              ('dmPaperWidth', ctypes.c_short),
-              ('dmScale', ctypes.c_short),
-              ('dmCopies', ctypes.c_short),
-              ('dmDefaultSource', ctypes.c_short),
-              ('dmPrintQuality', ctypes.c_short),
-              ('dmColor', ctypes.c_short),
-              ('dmDuplex', ctypes.c_short),
-              ('dmYResolution', ctypes.c_short),
-              ('dmTTOption', ctypes.c_short),
-              ('dmCollate', ctypes.c_short),
-              ('dmFormName', ctypes.c_wchar * 32),
-              ('dmLogPixels', wintypes.WORD),
-              ('dmBitsPerPel', wintypes.DWORD),
-              ('dmPelsWidth', wintypes.DWORD),
-              ('dmPelsHeight', wintypes.DWORD),
-              ('dmDisplayFlags', wintypes.DWORD),
-              ('dmDisplayFrequency', wintypes.DWORD),
-          ]
-
-      dm = DEVMODE()
-      dm.dmSize = ctypes.sizeof(DEVMODE)
-      dm.dmPelsWidth = width
-      dm.dmPelsHeight = height
-      dm.dmFields = 0x80000 | 0x100000  # DM_PELSWIDTH | DM_PELSHEIGHT
-
-      # 改变显示设置
-      result = user32.ChangeDisplaySettingsW(ctypes.byref(dm), 0)
-
-      if result == 0:  # DISP_CHANGE_SUCCESSFUL
-          print(f'Action: Resolution changed to '
-                f'{{width}}x{{height}} successfully')
-          return True
-      else:
-          print(f'Action: Failed to change resolution.'
-                f' Error code: {{result}}')
-          return False
-
-  except Exception as e:
-      print(f'Action: Error setting resolution: {{str(e)}}')
-      return False
-
-width = {width}
-height = {height}
-set_screen_resolution(width, height)
-"""
-        full_python_command = f'\npython -c @"{script}"@'
-
-        # 构造 PowerShell 命令
-        command = (
-            r'$env:Path += ";C:\Program Files\Python310"'
-            f"{full_python_command}"
-        )
         return await self.run_command_power_shell(command)
 
 

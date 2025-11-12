@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
-from advanced_version.computer_use_server.computer_use_agent import (  # noqa E501
+from .computer_use_agent import (  # noqa E501
     ComputerUseAgent,
 )
 from agents.agent import AgentRequest
@@ -22,9 +22,7 @@ from cua_utils import init_sandbox
 from enum import Enum
 
 # 导入Redis状态管理器
-from advanced_version.computer_use_server.redis_state_manager import (  # noqa E501
-    RedisStateManager,
-)
+from redis_state_manager import RedisStateManager
 
 # 云设备导入
 from sandbox_center.sandboxes.cloud_phone_wy import (
@@ -1575,7 +1573,7 @@ async def switch_environment(request: InitRequest):
         f"chat_id: {chat_id}, request:{request}",
     )
     # 验证会话有效性 - 只有活跃会话才能切换环境
-    await validate_user_session(user_id, chat_id, strict_mode=True)
+    await validate_user_session(user_id, chat_id, strict_mode=False)
 
     try:
         # 启动异步环境切换操作
@@ -1629,7 +1627,7 @@ async def get_operation_status(
             return {
                 "success": False,
                 "status": "failed",
-                "error": "Operation not found",
+                "error": "等待超时，请重新激活！",
                 "user_id": user_id,
                 "chat_id": chat_id,
                 "operation_id": operation_id,
