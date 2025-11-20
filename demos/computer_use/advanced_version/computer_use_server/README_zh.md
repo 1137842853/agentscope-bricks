@@ -255,9 +255,6 @@ python -m pip install aiohttp -i https://mirrors.aliyun.com/pypi/simple/
 python -m pip install asyncio -i https://mirrors.aliyun.com/pypi/simple/
 
 ```
-##### 1.2.2 云电脑临时图片存放文件夹创建
-
-c盘下 创建一个file文件夹
 
 #### 📱 1.3 云手机环境准备
 

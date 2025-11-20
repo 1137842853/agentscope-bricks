@@ -19,15 +19,15 @@ Computer Use Agent is an AI-based desktop automation system that can control the
 ### 🏗️ System Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend UI   │◄──►│   Backend API   │◄──►│   AI Agent App  │
-│  (Streamlit)    │    │   (FastAPI)     │    │ (GuiAgent)      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌─────────────────┐    ┌───────────────────────┐
+│   Frontend UI   │◄──►│   Backend API   │◄──►│   AI Agent App        │
+│  (Streamlit)    │    │   (FastAPI)     │    │ (GuiAgent)│Qwen-vl/max│
+└─────────────────┘    └─────────────────┘    └───────────────────────┘
                                                         │
                                                         ▼
                                               ┌─────────────────┐
                                               │ E2B Sandbox,    │
-                                              │ Wuying          │
+                                              │                 │
                                               │ (Desktop Env)   │
                                               └─────────────────┘
 ```

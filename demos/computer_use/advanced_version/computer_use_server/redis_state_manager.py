@@ -18,15 +18,15 @@ from redis_resource_allocator import (
 )
 from cua_utils import init_sandbox
 import os
-from sandbox_center.sandboxes.cloud_phone_wy import (
-    CloudPhone,
+from agentscope_runtime.sandbox.box.cloud_api.cloud_phone_sandbox import (
+    CloudPhoneSandbox,
 )
-from sandbox_center.sandboxes.cloud_computer_wy import (
-    CloudComputer,
+from agentscope_runtime.sandbox.box.cloud_api.cloud_computer_sandbox import (
+    CloudComputerSandbox,
 )
 from fastapi import HTTPException
 from agentscope_bricks.utils.logger_util import logger
-from sandbox_center.sandboxes.cloud_computer_wy import (
+from agentscope_runtime.sandbox.box.cloud_api.client.cloud_computer_wy import (
     AppStreamClient,
 )
 
@@ -3423,14 +3423,15 @@ class RedisStateManager:
             try:
                 logger.info("创建云电脑实例")
                 equipment = await asyncio.to_thread(
-                    CloudComputer,
+                    CloudComputerSandbox,
                     desktop_id=desktop_id,
                 )
-                await equipment.initialize()
             except Exception as e:
-                print(f"CloudComputer初始化失败: {e}，释放资源 {desktop_id}")
+                print(
+                    f"CloudComputerSandbox初始化失败: {e}，释放资源 {desktop_id}",
+                )
                 logger.error(
-                    f"CloudComputer初始化失败: {e}，释放资源 {desktop_id}",
+                    f"CloudComputerSandbox初始化失败: {e}，释放资源 {desktop_id}",
                 )
                 await self.pc_allocator.release_async(desktop_id)
                 raise HTTPException(
@@ -3455,10 +3456,9 @@ class RedisStateManager:
                     f"Start Equipment refresh instance_id {desktop_id}",
                 )
                 equipment = await asyncio.to_thread(
-                    CloudComputer,
+                    CloudComputerSandbox,
                     desktop_id=desktop_id,
                 )
-                await equipment.initialize()
                 logger.info(
                     f"new auth_code:{equipment.instance_manager.auth_code}",
                 )
@@ -3587,12 +3587,13 @@ class RedisStateManager:
             # 创建云手机设备对象 - 异步初始化
             try:
                 equipment = await asyncio.to_thread(
-                    CloudPhone,
+                    CloudPhoneSandbox,
                     instance_id=instance_id,
                 )
-                await equipment.initialize()
             except Exception as e:
-                print(f"CloudPhone初始化失败: {e}，释放资源 {instance_id}")
+                print(
+                    f"CloudPhoneSandbox初始化失败: {e}，释放资源 {instance_id}",
+                )
                 await self.phone_allocator.release_async(instance_id)
                 raise HTTPException(
                     503,
@@ -3614,10 +3615,9 @@ class RedisStateManager:
                     f"Start Equipment refresh instance_id {instance_id}",
                 )
                 equipment = await asyncio.to_thread(
-                    CloudPhone,
+                    CloudPhoneSandbox,
                     instance_id=instance_id,
                 )
-                await equipment.initialize()
                 logger.info(f"new ticket:{equipment.instance_manager.ticket}")
 
             logger.info(

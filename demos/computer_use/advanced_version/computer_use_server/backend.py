@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
-from .computer_use_agent import (  # noqa E501
+from computer_use_agent import (  # noqa E501
     ComputerUseAgent,
 )
 from agents.agent import AgentRequest
@@ -25,11 +25,11 @@ from enum import Enum
 from redis_state_manager import RedisStateManager
 
 # 云设备导入
-from sandbox_center.sandboxes.cloud_phone_wy import (
-    CloudPhone,
+from agentscope_runtime.sandbox.box.cloud_api.cloud_phone_sandbox import (
+    CloudPhoneSandbox,
 )
-from sandbox_center.sandboxes.cloud_computer_wy import (
-    CloudComputer,
+from agentscope_runtime.sandbox.box.cloud_api.cloud_computer_sandbox import (
+    CloudComputerSandbox,
 )
 
 from agentscope_bricks.utils.logger_util import logger
@@ -111,7 +111,7 @@ async def _wait_for_pc_ready(
     异步等待PC设备就绪，增加稳定性检查
 
     Args:
-        equipment: CloudComputer实例
+        equipment: CloudComputerSandbox实例
         desktop_id: 桌面ID
         max_wait_time: 最大等待时间（秒），默认5分钟
         stability_check_duration: 稳定性检查时长（秒），确保设备持续运行状态
@@ -188,7 +188,7 @@ async def _wait_for_phone_ready(
     异步等待手机设备就绪
 
     Args:
-        equipment: CloudPhone实例
+        equipment: CloudPhoneSandbox实例
         instance_id: 实例ID
         max_wait_time: 最大等待时间（秒），默认5分钟
     """
@@ -816,14 +816,13 @@ async def get_equipment(
                 # 创建云电脑实例
                 try:
                     equipment = await asyncio.to_thread(
-                        CloudComputer,
+                        CloudComputerSandbox,
                         desktop_id=desktop_id,
                     )
-                    await equipment.initialize()
                 except Exception as e:
                     # 初始化失败时释放已分配的资源
                     logger.error(
-                        f"CloudComputer初始化失败: {e}，释放资源 {desktop_id}",
+                        f"CloudComputerSandbox初始化失败: {e}，释放资源 {desktop_id}",
                     )
                     await state_manager.pc_allocator.release_async(desktop_id)
                     raise HTTPException(
@@ -907,14 +906,13 @@ async def get_equipment(
                 # 创建云手机设备对象 - 异步初始化
                 try:
                     equipment = await asyncio.to_thread(
-                        CloudPhone,
+                        CloudPhoneSandbox,
                         instance_id=instance_id,
                     )
-                    await equipment.initialize()
                 except Exception as e:
                     # 🚨 初始化失败时释放已分配的资源
                     logger.error(
-                        f"CloudPhone初始化失败: {e}，释放资源 {instance_id}",
+                        f"CloudPhoneSandbox初始化失败: {e}，释放资源 {instance_id}",
                     )
                     await state_manager.phone_allocator.release_async(
                         instance_id,

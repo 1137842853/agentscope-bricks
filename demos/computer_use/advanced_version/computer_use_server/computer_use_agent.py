@@ -9,14 +9,14 @@ from typing import Optional, Any, AsyncGenerator, Union
 from agentscope_bricks.utils.grounding_utils import draw_point, encode_image
 from pathlib import Path
 import time  # 添加 time 模块导入
-from sandbox_center.sandboxes.cloud_computer_wy import (
-    CloudComputer,
-)
-from sandbox_center.utils.utils import (
+from agentscope_runtime.sandbox.box.cloud_api.utils.utils import (
     get_image_size_from_url,
 )
-from sandbox_center.sandboxes.cloud_phone_wy import (
-    CloudPhone,
+from agentscope_runtime.sandbox.box.cloud_api.cloud_phone_sandbox import (
+    CloudPhoneSandbox,
+)
+from agentscope_runtime.sandbox.box.cloud_api.cloud_computer_sandbox import (
+    CloudComputerSandbox,
 )
 import asyncio
 
@@ -181,12 +181,12 @@ class ComputerUseAgent(Agent):
 
         if equipment_type == "pc_wuyin":
             return await self._create_device(
-                CloudComputer,
+                CloudComputerSandbox,
                 instance_info["desktop_id"],
             )
         elif equipment_type == "phone_wuyin":
             return await self._create_device(
-                CloudPhone,
+                CloudPhoneSandbox,
                 instance_info["instance_id"],
             )
         else:
@@ -195,11 +195,10 @@ class ComputerUseAgent(Agent):
     async def _create_device(self, device_class, device_id):
         """创建设备实例，自动处理事件循环问题"""
         try:
-            if device_class == CloudComputer:
-                device = CloudComputer(desktop_id=device_id)
-            else:  # CloudPhone
-                device = CloudPhone(instance_id=device_id)
-            await device.initialize()
+            if device_class == CloudComputerSandbox:
+                device = CloudComputerSandbox(desktop_id=device_id)
+            else:  # CloudPhoneSandbox
+                device = CloudPhoneSandbox(instance_id=device_id)
             return device
         except RuntimeError as e:
             if "There is no current event loop" in str(
@@ -219,11 +218,10 @@ class ComputerUseAgent(Agent):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            if device_class == CloudComputer:
-                device = CloudComputer(desktop_id=device_id)
+            if device_class == CloudComputerSandbox:
+                device = CloudComputerSandbox(desktop_id=device_id)
             else:
-                device = CloudPhone(instance_id=device_id)
-            loop.run_until_complete(device.initialize())
+                device = CloudPhoneSandbox(instance_id=device_id)
             return device
         finally:
             loop.close()
@@ -894,7 +892,9 @@ class ComputerUseAgent(Agent):
             try:
                 # 异步上传到oss
                 async def _upload_to_oss():
-                    return await self.equipment.upload_file_and_sign(
+                    ei_c = self.equipment.instance_manager.oss_client
+                    method = ei_c.oss_upload_file_and_sign_async
+                    return await method(
                         img_path,
                         oss_screenshot_filename,
                     )
@@ -980,7 +980,7 @@ class ComputerUseAgent(Agent):
         """电脑截图处理"""
         try:
             filepath, filename = self._prepare_screenshot_path(prefix)
-            await self.equipment.get_screenshot_base64_save_local(
+            await self.equipment.get_screenshot_base64_save_local_async(
                 filename.replace(".png", ""),
                 filepath,
             )
@@ -997,7 +997,7 @@ class ComputerUseAgent(Agent):
         """手机截图处理"""
         try:
             filepath, filename = self._prepare_screenshot_path(prefix)
-            oss_url = await self.equipment.get_screenshot_oss_phone()
+            oss_url = await self.equipment.get_screenshot_oss_phone_async()
 
             # 下载图片到本地
             await self._download_image(oss_url, filepath)
@@ -1033,7 +1033,7 @@ class ComputerUseAgent(Agent):
         """上传文件到OSS"""
         p = Path(filepath)
         oss_filepath = f"{p.stem}_{uuid4().hex}{p.suffix}"
-        return await self.equipment.upload_file_and_sign(
+        return await self.equipment.oss_client.oss_upload_file_and_sign_async(
             filepath,
             oss_filepath,
         )
@@ -1593,7 +1593,7 @@ class ComputerUseAgent(Agent):
                 name = action_parameter["name"]
                 if name == "File Explorer":
                     name = "文件资源管理器"
-                await equipment.open_app(name)
+                await equipment.open_app_async(name)
             elif action_type == "wait":
                 wait_time = action_parameter.get("time", 5)
                 await asyncio.sleep(wait_time)
@@ -1601,55 +1601,55 @@ class ComputerUseAgent(Agent):
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
                 count = action_parameter["count"]
-                await equipment.tap(x, y, count=count)
+                await equipment.tap_async(x, y, count=count)
             elif action_type == "right click":
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
                 count = action_parameter["count"]
-                await equipment.right_tap(x, y, count=count)
+                await equipment.right_tap_async(x, y, count=count)
             elif action_type == "hotkey":
                 keylist = action_parameter["key_list"]
-                await equipment.hotkey(keylist)
+                await equipment.hotkey_async(keylist)
             elif action_type == "presskey":
                 key = action_parameter["key"]
-                await equipment.press_key(key)
+                await equipment.press_key_async(key)
             elif action_type == "click_type":
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
                 text = action_parameter["text"]
-                await equipment.tap_type_enter(x, y, text)
+                await equipment.tap_type_enter_async(x, y, text)
             elif action_type == "drag":
                 x1 = action_parameter["position1"][0]
                 y1 = action_parameter["position1"][1]
                 x2 = action_parameter["position2"][0]
                 y2 = action_parameter["position2"][1]
-                await equipment.drag(x1, y1, x2, y2)
+                await equipment.drag_async(x1, y1, x2, y2)
             elif action_type == "replace":
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
                 text = action_parameter["text"]
-                await equipment.replace(x, y, text)
+                await equipment.replace_async(x, y, text)
             elif action_type == "append":
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
                 text = action_parameter["text"]
-                await equipment.append(x, y, text)
+                await equipment.append_async(x, y, text)
             elif action_type == "tell":
                 answer_dict = action_parameter["answer"]
                 print(answer_dict)
             elif action_type == "mouse_move":
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
-                await equipment.mouse_move(x, y)
+                await equipment.mouse_move_async(x, y)
             elif action_type == "middle_click":
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
-                await equipment.middle_click(x, y)
+                await equipment.middle_click_async(x, y)
             elif action_type == "type_with_clear_enter":
                 clear = action_parameter["clear"]
                 enter = action_parameter["enter"]
                 text = action_parameter["text"]
-                await equipment.type_with_clear_enter(text, clear, enter)
+                await equipment.type_with_clear_enter_async(text, clear, enter)
             elif action_type == "call_user":
                 task = mode_response.get("explanation")
                 return await self._handle_human_intervention(task, step_count)
@@ -1658,17 +1658,17 @@ class ComputerUseAgent(Agent):
                     x = action_parameter["position"][0]
                     y = action_parameter["position"][1]
                     pixels = action_parameter["pixels"]
-                    await equipment.scroll_pos(x, y, pixels)
+                    await equipment.scroll_pos_async(x, y, pixels)
                 else:  # e2e
                     pixels = action_parameter["pixels"]
-                    await equipment.scroll(pixels)
+                    await equipment.scroll_async(pixels)
             elif action_type == "type_with_clear_enter_pos":  # New
                 clear = action_parameter["clear"]
                 enter = action_parameter["enter"]
                 text = action_parameter["text"]
                 x = action_parameter["position"][0]
                 y = action_parameter["position"][1]
-                await equipment.type_with_clear_enter_pos(
+                await equipment.type_with_clear_enter_pos_async(
                     text,
                     x,
                     y,
@@ -1714,7 +1714,7 @@ class ComputerUseAgent(Agent):
                         int(coordinate[2]),
                         int(coordinate[3]),
                     )
-                    await equipment.tab(x1, y1, x2, y2, width, height)
+                    await equipment.tab_async(x1, y1, x2, y2, width, height)
                 elif "Swipe down" in operation:
                     x1, y1 = int(width * screen_size / 2), int(
                         height * screen_size / 3,
@@ -1722,7 +1722,7 @@ class ComputerUseAgent(Agent):
                     x2, y2 = int(width * screen_size / 2), int(
                         2 * height * screen_size / 3,
                     )
-                    await equipment.slide(x1, y1, x2, y2)
+                    await equipment.slide_async(x1, y1, x2, y2)
                 elif "Swipe up" in operation:
                     x1, y1 = int(width * screen_size / 2), int(
                         2 * height * screen_size / 3,
@@ -1730,7 +1730,7 @@ class ComputerUseAgent(Agent):
                     x2, y2 = int(width * screen_size / 2), int(
                         height * screen_size / 3,
                     )
-                    await equipment.slide(x1, y1, x2, y2)
+                    await equipment.slide_async(x1, y1, x2, y2)
                 elif "Swipe" in operation:
                     coordinate = (
                         operation.split("(")[-1].split(")")[0].split(",")
@@ -1747,14 +1747,14 @@ class ComputerUseAgent(Agent):
                     a_y1, a_y2 = int(y1 * screen_size + y2 * 0), int(
                         y1 * 0 + y2 * screen_size,
                     )
-                    await equipment.slide(a_x1, a_y1, a_x2, a_y2)
+                    await equipment.slide_async(a_x1, a_y1, a_x2, a_y2)
                 elif "Type" in operation:
                     parameter = operation.split("(")[-1].split(")")[0]
-                    await equipment.type(parameter)
+                    await equipment.type_async(parameter)
                 elif "Back" in operation:
-                    await equipment.back()
+                    await equipment.back_async()
                 elif "Home" in operation:
-                    await equipment.home()
+                    await equipment.home_async()
                 elif "Done" in operation:
                     return {"result": "stop"}
                 elif "Answer" in operation:

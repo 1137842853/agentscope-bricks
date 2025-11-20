@@ -4,7 +4,7 @@ import io
 import re
 import base64
 import json
-from sandbox_center.sandboxes.e2b_sandbox import (
+from agentscope_runtime.sandbox.box.e2b.e2b_sandbox import (
     E2bSandBox,
 )
 from openai import OpenAI
@@ -23,7 +23,7 @@ def init_sandbox():
     try:
         sandbox = E2bSandBox()
         # sandbox = Sandbox(timeout=120)
-        sandbox.device.stream.start()
+        # sandbox.device.stream.start()
         return sandbox
     except Exception as e:
         print(f"Error initializing sandbox: {e}")

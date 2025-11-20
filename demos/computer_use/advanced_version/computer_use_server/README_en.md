@@ -259,9 +259,6 @@ python -m pip install aiohttp -i https://mirrors.aliyun.com/pypi/simple/
 python -m pip install asyncio -i https://mirrors.aliyun.com/pypi/simple/
 
 ```
-##### 1.2.2 Cloud computer temporary image storage folder creation
-
-Create a file folder under the C drive
 
 #### 📱 1.3 Cloud Phone Environment Preparation
 

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
-from sandbox_center.sandboxes.e2b_sandbox import (
+from agentscope_runtime.sandbox.box.e2b.e2b_sandbox import (
     E2bSandBox,
 )
 from openai import OpenAI

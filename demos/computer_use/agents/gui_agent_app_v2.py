@@ -30,7 +30,7 @@ class GuiAgentResponse(BaseModel):
     thought: str
     explanation: str
     action: str
-    action_params: str
+    action_params: Union[str, dict]
     operation: str
 
 

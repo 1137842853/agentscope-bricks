@@ -11,11 +11,11 @@ from typing import Tuple, List, Dict, Any, Optional
 import redis.asyncio as redis
 from agentscope_bricks.utils.logger_util import logger
 from enum import Enum, auto
-from sandbox_center.sandboxes.cloud_phone_wy import (
-    CloudPhone,
+from agentscope_runtime.sandbox.box.cloud_api.cloud_phone_sandbox import (
+    CloudPhoneSandbox,
 )
-from sandbox_center.sandboxes.cloud_computer_wy import (
-    CloudComputer,
+from agentscope_runtime.sandbox.box.cloud_api.cloud_computer_sandbox import (
+    CloudComputerSandbox,
 )
 from fastapi import HTTPException
 
@@ -194,10 +194,9 @@ class AsyncRedisResourceAllocator:
                     f"[{self.resource_type}] 休眠,重置设备: {instance_id}",
                 )
                 equipment = await asyncio.to_thread(
-                    CloudPhone,
+                    CloudPhoneSandbox,
                     instance_id=instance_id,
                 )
-                await equipment.initialize()
                 e_client = equipment.instance_manager.eds_client
                 should_reset_image = os.environ.get("EQUIP_RESET", 1) == "1"
                 if should_reset_image:
@@ -233,10 +232,9 @@ class AsyncRedisResourceAllocator:
                     )
             elif self.resource_type == "pc":
                 equipment = await asyncio.to_thread(
-                    CloudComputer,
+                    CloudComputerSandbox,
                     desktop_id=instance_id,
                 )
-                await equipment.initialize()
                 should_reset_image = os.environ.get("EQUIP_RESET", 1) == "1"
                 e_client = equipment.instance_manager.ecd_client
                 if should_reset_image:

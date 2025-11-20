@@ -5,19 +5,9 @@ import json
 import datetime
 import asyncio
 import threading
-import requests
-from sandbox_center.gui_tools import (
-    GUI_TOOLS,
-    PCA_GUI_TOOLS,
-    set_device,
-)
-
 from agentscope_bricks.utils.grounding_utils import draw_point, encode_image
 from cua_utils_base import logger, Message, parse_json, QwenProvider
-from sandbox_center.utils.oss_client import OSSClient
-from sandbox_center.sandboxes.e2b_sandbox import (
-    E2bSandBox,
-)
+from agentscope_runtime.sandbox.box.cloud_api.utils.oss_client import OSSClient
 from agents.gui_agent_app_v2 import (
     GuiAgent,
 )
@@ -39,10 +29,9 @@ def safe_strip(value):
     return value.strip()
 
 
-def register_tools(equipment: E2bSandBox, tool_functions: dict):
-    """安全的工具注册函数，处理空值情况"""
-    set_device(equipment)
-    tools = {
+def get_basic_tools():
+    """获取基础工具 schema（用于模型调用）"""
+    return {
         "stop": {
             "description": "Indicate that the task has been completed.",
             "params": {},
@@ -68,47 +57,112 @@ def register_tools(equipment: E2bSandBox, tool_functions: dict):
                 },
             },
         },
+        "click": {
+            "description": (
+                "Click at specific coordinates or based on visual query. "
+                "If query is provided, it will search for the "
+                "element visually."
+            ),
+            "params": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate for clicking",
+                },
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate for clicking",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of clicks (1 for single click"
+                    ", 2 for double click)",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Visual query to find the element to click",
+                },
+            },
+        },
+        "right_click": {
+            "description": "Right click at specific coordinates.",
+            "params": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate for" " right clicking",
+                },
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate for" " right clicking",
+                },
+            },
+        },
+        "type_text": {
+            "description": "Type text in the sandbox environment.",
+            "params": {
+                "text": {"type": "string", "description": "The text to type"},
+            },
+        },
+        "click_and_type": {
+            "description": "Click at coordinates and then type text.",
+            "params": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate for clicking",
+                },
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate for clicking",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The text to type" " after clicking",
+                },
+            },
+        },
+        "press_key": {
+            "description": "Press a key or key combination.",
+            "params": {
+                "key": {
+                    "type": "string",
+                    "description": "Single key to press "
+                    "(e.g., 'Enter', 'Tab')",
+                },
+                "key_combination": {
+                    "type": "string",
+                    "description": "Key combination to"
+                    " press (e.g., 'Ctrl+C')",
+                },
+            },
+        },
+        "run_shell_command": {
+            "description": "Execute a shell command in the sandbox.",
+            "params": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command" " to execute",
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Whether to run the command in"
+                    " the background",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout for the command execution"
+                    " in seconds",
+                },
+            },
+        },
+        "screenshot": {
+            "description": "Take a screenshot and save it to a file.",
+            "params": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path where to save the screenshot",
+                },
+            },
+        },
     }
-
-    # 安全处理工具函数
-    if tool_functions:
-        for name, tool in tool_functions.items():
-            try:
-                # 安全获取 params
-                if hasattr(tool, "function_schema") and tool.function_schema:
-                    if (
-                        hasattr(tool.function_schema, "parameters")
-                        and tool.function_schema.parameters
-                    ):
-                        params = tool.function_schema.parameters.model_dump()
-                    else:
-                        params = {}
-
-                    # 安全获取 description
-                    if (
-                        hasattr(tool.function_schema, "description")
-                        and tool.function_schema.description
-                    ):
-                        description = tool.function_schema.description
-                    else:
-                        description = f"Function {name}"
-                else:
-                    params = {}
-                    description = f"Function {name}"
-
-                tools[name] = {
-                    "description": description,
-                    "params": params or {},
-                }
-            except Exception as e:
-                logger.log(f"Error registering tool {name}: {e}", "red")
-                # 提供一个默认的工具配置
-                tools[name] = {
-                    "description": f"Function {name}",
-                    "params": {},
-                }
-
-    return tools
 
 
 class ComputerUseAgent:
@@ -134,6 +188,7 @@ class ComputerUseAgent:
         self.status_callback = status_callback  # 状态回调函数
         self.max_steps = max_steps
         self.equipment = equipment
+        self.oss_client = OSSClient()
         # 修改设备处理逻辑
         if hasattr(equipment, "device") and equipment.device:
             self.sandbox = equipment.device
@@ -141,108 +196,28 @@ class ComputerUseAgent:
             # 如果equipment本身就是设备对象，则直接使用
             self.sandbox = equipment
 
-        # 初始化工具
+        # 初始化工具（简化版本，仅用于模型调用）
         self.tools = {}
-        self.tool_functions = {}
         try:
             if mode == "qwen_vl":
-                self.tool_functions = GUI_TOOLS
-                self.tools = register_tools(equipment, self.tool_functions)
+                self.tools = get_basic_tools()
             elif mode == "pc_use":
                 self.session_id = ""
                 self.add_info = pc_use_add_info
-                if self.sandbox_type == "e2b-desktop":
-                    self.tool_functions = PCA_GUI_TOOLS
-                    self.tools = register_tools(equipment, self.tool_functions)
             else:
                 raise ValueError(
                     f"Invalid mode: {mode}, must be one "
                     f"of: [qwen_vl, pc_use, wy_pc_use]",
                 )
         except Exception as e:
-            logger.log(f"Error initializing tools: {e}", "red")
-            # 提供默认工具
-            self.tools = {
-                "stop": {
-                    "description": "Indicate that the task "
-                    "has been completed.",
-                    "params": {},
-                },
-                HUMAN_HELP_ACTION: {
-                    "description": "Wait for the given amount "
-                    "of time for human to do the task.",
-                    "params": {
-                        "time": {
-                            "type": "integer",
-                            "description": "Time in seconds",
-                        },
-                        "task": {
-                            "type": "string",
-                            "description": "Task description",
-                        },
-                    },
-                },
-            }
+            logger.log(f"Error initializing mode: {e}", "red")
 
         # Set the log file location
         if save_logs:
             logger.log_file = f"{output_dir}/log.html"
 
-        # 安全生成工具列表日志
-        log_str = self._generate_tools_log()
-
-        try:
-            safe_log_str = (
-                safe_strip(log_str)
-                if log_str
-                else "The agent will use default tools"
-            )
-            logger.log(safe_log_str, "gray")
-            self.emit_status("TASK", {"message": safe_log_str})
-        except Exception as e:
-            logger.log(f"Error logging tools info: {e}", "red")
-
         self._is_cancelled = False
         self._interrupted = False
-
-    def _generate_tools_log(self):
-        """安全生成工具列表日志"""
-        try:
-            if not self.tools:
-                return "The agent will use the following actions:\n- stop()\n"
-
-            log_str = "The agent will use the following actions:\n"
-            for action, details in self.tools.items():
-                try:
-                    if not details or not isinstance(details, dict):
-                        param_str = ""
-                    else:
-                        params = details.get("params", {})
-                        if params and isinstance(params, dict):
-                            properties = params.get("properties", {})
-                            if properties and isinstance(properties, dict):
-                                param_str = ", ".join(
-                                    str(key) for key in properties.keys()
-                                )
-                            else:
-                                param_str = ""
-                        else:
-                            param_str = ""
-
-                    log_str += f"- {action}({param_str})\n"
-                except Exception as e:
-                    logger.log(f"Error processing tool {action}: {e}", "red")
-                    log_str += f"- {action}()\n"
-
-            return (
-                log_str
-                if log_str
-                else "The agent will use the following actions:\n"
-            )
-
-        except Exception as e:
-            logger.log(f"Error generating tools log: {e}", "red")
-            return "The agent will use the following actions:\n- stop()\n"
 
     def stop(self):
         self._is_cancelled = True
@@ -272,43 +247,6 @@ class ComputerUseAgent:
                 "status": "running",
             },
         )
-
-    def close_equipment(self, session_id: str):
-        """
-        由前端调用，用于中断当前的等待状态
-        """
-
-        print("Agent wait close equipment by user request.")
-        try:
-            status, res = self.equipment.agent_bay_instance.close_session(
-                session_id=session_id,
-            )
-            # 发送状态更新到前端
-            if status == "success":
-                self.emit_status(
-                    "SYSTEM",
-                    {
-                        "message": "Close equipment success",
-                        "status": "running",
-                    },
-                )
-            else:
-                self.emit_status(
-                    "SYSTEM",
-                    {
-                        "message": "Close equipment failed",
-                        "status": "running",
-                    },
-                )
-        except Exception as e:
-            logger.log(f"Error closing equipment: {e}", "red")
-            self.emit_status(
-                "SYSTEM",
-                {
-                    "message": f"Close equipment error: {e}",
-                    "status": "running",
-                },
-            )
 
     def emit_status(self, status_type: str, data: dict):
         """发射状态更新 - 支持同步和异步回调"""
@@ -344,7 +282,7 @@ class ComputerUseAgent:
                 f"{screenshot_filename[:-4]}_annotated",
             )
         # 上传到oss
-        oss_url = self.equipment.upload_file_and_sign(
+        oss_url = self.oss_client.oss_upload_file_and_sign(
             img_path,
             screenshot_filename,
         )
@@ -368,36 +306,353 @@ class ComputerUseAgent:
         thread.daemon = True
         thread.start()
 
-    def call_function(self, name, arguments):
-        func_impl = (
-            self.tool_functions.get(name.lower())
-            if hasattr(self, "tool_functions")
-            and self.tool_functions
-            and name.lower() in self.tools
-            else None
-        )
-        if func_impl:
-            try:
-                # Ensure arguments is a dictionary
-                if isinstance(arguments, str):
-                    arguments = parse_json(arguments) or {}
-                elif arguments is None:
-                    arguments = {}
-                # 处理传入的是 JSON Schema 格式的情况
-                if isinstance(arguments, dict) and "properties" in arguments:
-                    # 提取实际的参数值
-                    arguments = arguments.get("properties", {})
+    def _execute_pc_action(self, mode_response, step_count=None):
+        """
+        Execute PC actions based on mode response.
+        This method maps action_type to E2B tool calls.
 
-                result = func_impl(**arguments) if arguments else func_impl()
-                return result
-            except Exception as e:
-                return (
-                    f"Error executing function: {str(e)}, "
-                    f"when calling function: {name} "
-                    f"with arguments: {arguments}"
+        Args:
+            mode_response: Dictionary or object containing
+            'action' and 'action_params'
+            step_count: Optional step count for logging
+
+        Returns:
+            Dict with 'result' key indicating 'stop', 'continue'
+            , or error information
+        """
+        try:
+            # 支持字典或对象格式的 mode_response
+            if isinstance(mode_response, dict):
+                action_type = mode_response.get("action", "")
+                action_parameter = mode_response.get("action_params", {})
+            else:
+                action_type = getattr(mode_response, "action", "")
+                action_parameter = getattr(mode_response, "action_params", {})
+
+            if not action_type:
+                logger.log("Warning: No action type provided", "yellow")
+                return {
+                    "result": "continue",
+                    "error": "No action type provided",
+                }
+
+            logger.log(f"Executing PC action: {action_type}", "gray")
+
+            # 处理 stop 动作
+            if action_type == "stop":
+                logger.log("Task stopped by action", "yellow")
+                return {"result": "stop"}
+
+            # 处理 human_help / call_user 动作
+            if action_type in ["call_user", HUMAN_HELP_ACTION]:
+                task = (
+                    mode_response.get("explanation", "")
+                    if isinstance(mode_response, dict)
+                    else getattr(mode_response, "explanation", "")
                 )
+                # 如果没有 explanation，尝试从 action_params 中获取 task
+                if not task and isinstance(action_parameter, dict):
+                    task = action_parameter.get("task", "")
+                return self._handle_human_intervention(task, step_count)
+
+            # 映射 action_type 到 E2B 工具调用
+            tool_name = None
+            tool_arguments = {}
+
+            if action_type == "click":
+                # 映射 click 到 E2B click 工具
+                if "position" in action_parameter:
+                    tool_arguments["x"] = action_parameter["position"][0]
+                    tool_arguments["y"] = action_parameter["position"][1]
+                else:
+                    tool_arguments["x"] = action_parameter.get("x", 0)
+                    tool_arguments["y"] = action_parameter.get("y", 0)
+                tool_arguments["count"] = action_parameter.get("count", 1)
+                if "query" in action_parameter:
+                    tool_arguments["query"] = action_parameter["query"]
+                tool_name = "click"
+
+            elif action_type == "right click":
+                # 映射 right click 到 E2B right_click 工具
+                if "position" in action_parameter:
+                    tool_arguments["x"] = action_parameter["position"][0]
+                    tool_arguments["y"] = action_parameter["position"][1]
+                else:
+                    tool_arguments["x"] = action_parameter.get("x", 0)
+                    tool_arguments["y"] = action_parameter.get("y", 0)
+                tool_name = "right_click"
+
+            elif (
+                action_type == "click_type" or action_type == "click_and_type"
+            ):
+                # 映射 click_type 到 E2B click_and_type 工具
+                if "position" in action_parameter:
+                    tool_arguments["x"] = action_parameter["position"][0]
+                    tool_arguments["y"] = action_parameter["position"][1]
+                else:
+                    tool_arguments["x"] = action_parameter.get("x", 0)
+                    tool_arguments["y"] = action_parameter.get("y", 0)
+                tool_arguments["text"] = action_parameter.get("text", "")
+                tool_name = "click_and_type"
+
+            elif (
+                action_type == "type_text"
+                or action_type == "type"
+                or action_type == "type_with_clear_enter_pos"
+            ):
+                # 映射 type_text 到 E2B type_text 工具
+                tool_arguments["text"] = action_parameter.get("text", "")
+                tool_name = "type_text"
+
+            elif action_type == "presskey" or action_type == "press_key":
+                # 映射 presskey 到 E2B press_key 工具
+                if "key" in action_parameter:
+                    tool_arguments["key"] = action_parameter["key"]
+                if "key_combination" in action_parameter:
+                    tool_arguments["key_combination"] = action_parameter[
+                        "key_combination"
+                    ]
+                tool_name = "press_key"
+
+            elif action_type == "hotkey":
+                # 映射 hotkey 到 E2B press_key 工具（使用 key_combination）
+                if "key_list" in action_parameter:
+                    # 将 key_list 转换为 key_combination 格式，如 "Ctrl+C"
+                    key_list = action_parameter["key_list"]
+                    if isinstance(key_list, list):
+                        tool_arguments["key_combination"] = "+".join(key_list)
+                    else:
+                        tool_arguments["key_combination"] = str(key_list)
+                tool_name = "press_key"
+
+            elif (
+                action_type == "run_shell_command"
+                or action_type == "run_command"
+            ):
+                # 映射 run_command 到 E2B run_shell_command 工具
+                tool_arguments["command"] = action_parameter.get("command", "")
+                tool_arguments["background"] = action_parameter.get(
+                    "background",
+                    False,
+                )
+                tool_arguments["timeout"] = action_parameter.get("timeout", 60)
+                tool_name = "run_shell_command"
+
+            elif action_type == "screenshot":
+                # 映射 screenshot 到 E2B screenshot 工具
+                if "file_path" not in action_parameter:
+                    self.image_counter += 1
+                    filename = f"screenshot_{self.image_counter}.png"
+                    filepath = os.path.join(self.tmp_dir, filename)
+                    tool_arguments["file_path"] = filepath
+                else:
+                    tool_arguments["file_path"] = action_parameter["file_path"]
+                tool_name = "screenshot"
+
+            elif action_type == "wait":
+                # 处理 wait 动作（不需要调用 sandbox）
+                wait_time = action_parameter.get("time", 5)
+                import time
+
+                time.sleep(wait_time)
+                return {
+                    "result": "continue",
+                    "output": f"Waited for {wait_time} seconds",
+                }
+
+            else:
+                logger.log(
+                    f"Warning: Unknown action_type '{action_type}'",
+                    "yellow",
+                )
+                return {
+                    "result": "continue",
+                    "error": f"Unknown action_type '{action_type}'",
+                }
+
+            # 调用 E2B 工具
+            if tool_name:
+                result = self.equipment._call_cloud_tool(
+                    tool_name,
+                    tool_arguments,
+                )
+
+                # 处理返回结果格式
+                if isinstance(result, dict):
+                    if result.get("success"):
+                        output = result.get(
+                            "output",
+                            "Tool executed successfully",
+                        )
+                        # 如果是 screenshot，更新 latest_screenshot
+                        if (
+                            tool_name == "screenshot"
+                            and "file_path" in tool_arguments
+                        ):
+                            self.latest_screenshot = tool_arguments[
+                                "file_path"
+                            ]
+                        return {"result": "continue", "output": output}
+                    else:
+                        error_msg = result.get("error", "Unknown error")
+                        return {
+                            "result": "continue",
+                            "error": error_msg,
+                        }
+                else:
+                    return {"result": "continue", "output": str(result)}
+
+            return {"result": "continue"}
+
+        except Exception as e:
+            logger.log(f"Error in _execute_pc_action: {e}", "red")
+            return {
+                "result": "continue",
+                "error": f"Error executing action: {str(e)}",
+            }
+
+    def _handle_human_intervention(self, task, step_count=None):
+        """
+        Handle human intervention request.
+
+        Args:
+            task: Task description for human
+            step_count: Optional step count
+
+        Returns:
+            Dict with result information, including status update info
+        """
+        import time
+
+        time_to_sleep = int(os.getenv("HUMAN_WAIT_TIME", 15))
+        logger.log(
+            f"HUMAN_HELP: The system will wait for {time_to_sleep} "
+            f"seconds for human to do the task: {task}",
+        )
+
+        # 构建状态更新信息
+        status_info = {
+            "human_help_status": False,
+            "action_executed": (
+                f"The system will wait for {time_to_sleep} "
+                f"seconds for human to do the task:\n\n {task}"
+            ),
+        }
+
+        # 可中断等待
+        start_time = time.time()
+        waited_time = 0
+        sleep_interval = min(5, time_to_sleep)
+
+        # 重置中断标志
+        self._interrupted = False
+
+        # 可中断的等待循环
+        while waited_time < time_to_sleep and not self._interrupted:
+            time.sleep(min(sleep_interval, time_to_sleep - waited_time))
+            waited_time = time.time() - start_time
+
+        if self._interrupted:
+            logger.log("Human help wait was interrupted by user.", "yellow")
+            self._interrupted = False
+            status_info["human_help_status"] = False
+            return {
+                "result": "continue",
+                "output": "Human help wait was interrupted",
+                "status_info": status_info,
+            }
         else:
-            return "Function not implemented."
+            logger.log("Human help wait completed.", "yellow")
+            status_info["human_help_status"] = True
+            return {
+                "result": "continue",
+                "output": f"Human help wait completed for task: {task}",
+                "status_info": status_info,
+            }
+
+    def call_function(self, name, arguments, step_info=None):
+        """
+        调用工具函数，通过 _execute_pc_action 方法执行。
+        将工具名和参数转换为 action 格式，然后调用 _execute_pc_action。
+
+        Args:
+            name: 工具名称
+            arguments: 工具参数
+            step_info: 可选的步骤信息字典，用于更新状态
+
+        Returns:
+            执行结果的字符串表示
+        """
+        # 处理特殊工具 stop
+        if name == "stop":
+            return "Task stopped"
+
+        # 确保 arguments 是字典类型
+        if isinstance(arguments, str):
+            arguments = parse_json(arguments) or {}
+        elif arguments is None:
+            arguments = {}
+
+        # 处理传入的是 JSON Schema 格式的情况
+        if isinstance(arguments, dict) and "properties" in arguments:
+            # 提取实际的参数值
+            arguments = arguments.get("properties", {})
+
+        # 将工具名映射到 action_type
+        # 工具名到 action_type 的映射
+        tool_name_mapping = {
+            "right_click": "right click",  # 需要转换为空格格式
+            # 其他工具名可以直接使用，因为 _execute_pc_action 支持多种格式
+        }
+        action_type = tool_name_mapping.get(name, name)
+
+        # 构建 mode_response 格式
+        mode_response = {
+            "action": action_type,
+            "action_params": arguments,
+        }
+
+        # 处理 human_help 特殊情况
+        if name == HUMAN_HELP_ACTION:
+            mode_response["action"] = HUMAN_HELP_ACTION
+            mode_response["explanation"] = arguments.get("task", "")
+
+        try:
+            # 调用 _execute_pc_action
+            result = self._execute_pc_action(mode_response)
+
+            # 处理状态更新（特别是 human_help 的状态）
+            if step_info is not None and isinstance(result, dict):
+                status_info = result.get("status_info", {})
+                if status_info:
+                    step_info.update(status_info)
+
+            # 处理返回结果格式，将字典转换为字符串
+            if isinstance(result, dict):
+                if result.get("result") == "stop":
+                    return "Task stopped"
+                elif result.get("result") == "continue":
+                    # 返回 output 或 error 信息
+                    if "output" in result:
+                        return result["output"]
+                    elif "error" in result:
+                        return f"Error: {result['error']}"
+                    else:
+                        return "Tool executed successfully"
+                else:
+                    return str(
+                        result.get("output", "Tool executed successfully"),
+                    )
+            else:
+                return str(result) if result else "Tool executed successfully"
+
+        except Exception as e:
+            logger.log(f"Error in call_function: {e}", "red")
+            return (
+                f"Error executing function: {str(e)}, "
+                f"when calling function: {name} "
+                f"with arguments: {arguments}"
+            )
 
     def save_image(self, image, prefix="image"):
         self.image_counter += 1
@@ -419,77 +674,8 @@ class ComputerUseAgent:
         with open(filename, "rb") as image_file:
             return image_file.read(), filename
 
-    def screenshot_base64_save_local_wy(self, prefix="image"):
-        self.image_counter += 1
-        filename = f"{prefix}_{self.image_counter}.png"
-        filename_ = f"{prefix}_{self.image_counter}"
-        filepath = os.path.join(self.tmp_dir, filename)
-        file_base64 = self.equipment.get_screenshot_base64_save_local(
-            filename_,
-            filepath,
-        )
-        logger.log(f"screenshot {filename}", "gray")
-        self.latest_screenshot = filepath
-        with open(filepath, "rb") as image_file:
-            return image_file.read(), file_base64.split(",")[1], filename
-
-    def screenshot_save_local_wy(self, prefix="image"):
-        self.image_counter += 1
-        filename = f"{prefix}_{self.image_counter}.png"
-        filename_ = f"{prefix}_{self.image_counter}"
-        filepath = os.path.join(self.tmp_dir, filename)
-        file_os_url = self.equipment.get_screenshot_oss_save_local(
-            filename_,
-            filepath,
-        )
-        logger.log(f"file_os_url {file_os_url}")
-        self.latest_screenshot = filepath
-        with open(filepath, "rb") as image_file:
-            return image_file.read(), file_os_url, filename
-
     def screenshot_save_oss(self, data: bytes, file_name: str):
-        oss_client = OSSClient()
-        return oss_client.oss_upload_data_and_sign(data, file_name)
-
-    def screenshot_base64_save_local_phone_wy(self, prefix="image"):
-        self.image_counter += 1
-        filename = f"{prefix}_{self.image_counter}.png"
-        filepath = os.path.join(self.tmp_dir, filename)
-        file_oss = self.equipment.get_screenshot_oss_phone()  # 获取 OSS URL
-        # 下载远程图片并保存到本地
-        response = requests.get(file_oss, stream=True)
-        if response.status_code == 200:
-            with open(filepath, "wb") as f:
-                for chunk in response.iter_content(1024):
-                    f.write(chunk)
-        else:
-            raise Exception(f"Failed to download image from {file_oss}")
-
-        self.latest_screenshot = filepath
-
-        # 读取图像二进制数据
-        with open(filepath, "rb") as image_file:
-            return image_file.read(), file_oss, filename
-
-    def screenshot_base64_save_local_agent_bay_wy(self, prefix="image"):
-        self.image_counter += 1
-        filename = f"{prefix}_{self.image_counter}.png"
-        filepath = os.path.join(self.tmp_dir, filename)
-        file_oss = self.equipment.get_screenshot_oss_url()  # 获取 OSS URL
-        # 下载远程图片并保存到本地
-        response = requests.get(file_oss, stream=True)
-        if response.status_code == 200:
-            with open(filepath, "wb") as f:
-                for chunk in response.iter_content(1024):
-                    f.write(chunk)
-        else:
-            raise Exception(f"Failed to download image from {file_oss}")
-
-        self.latest_screenshot = filepath
-
-        # 读取图像二进制数据
-        with open(filepath, "rb") as image_file:
-            return image_file.read(), file_oss, filename
+        return self.oss_client.oss_upload_data_and_sign(data, file_name)
 
     def analyse_screenshot(self, is_debug=False, debug_file_path=None):
         screenshot_img, screenshot_filename = self.screenshot()
@@ -687,6 +873,9 @@ class ComputerUseAgent:
                 if hasattr(mode_response, "request_id"):
                     auxiliary_info["request_id"] = mode_response.request_id
 
+                # 保存 mode_response 到 auxiliary_info，供后续直接使用
+                auxiliary_info["mode_response"] = mode_response.model_dump()
+
                 # 为click类型的动作生成标注图片
                 if action in ["click", "right click"]:
                     try:
@@ -798,193 +987,276 @@ class ComputerUseAgent:
                         step_info["auxiliary_info"].update(auxiliary_info)
                     self.emit_status("STEP", step_info)
 
-                    action_messages = [
-                        Message(action_system_prompt, role="system"),
-                        *self.messages,
-                        Message(
-                            logger.log(
-                                f"{screenshot_analysis}",
-                                "green",
-                            ),
-                            role="user",
-                        ),
-                    ]
-
-                    # Debug: save action_model request
-                    if is_debug and debug_file_path:
-                        with open(debug_file_path, "a", encoding="utf-8") as f:
-                            f.write(f"\n{'=' * 50}\n")
-                            f.write(
-                                f"ACTION_MODEL REQUEST - "
-                                f"{datetime.datetime.now()}\n",
-                            )
-                            f.write("=" * 50 + "\n")
-                            for i, msg in enumerate(action_messages):
-                                role = msg.get("role", "user")
-                                f.write(f"Message {i + 1} (role: {role}):\n")
-                                content = msg.get("content", msg)
-                                content_str = str(content)
-                                truncated = (
-                                    content_str[:1000] + "..."
-                                    if len(content_str) > 1000
-                                    else content_str
-                                )
-                                f.write(f"  Content: {truncated}\n")
-                            tools_list = list(self.tools.keys())
-                            f.write(f"\nTools available: {tools_list}\n\n")
-
-                    try:
-                        content, tool_calls = action_model.call(
-                            action_messages,
-                            self.tools,
-                        )
-                    except Exception as e:
-                        logger.log(f"Error calling action model: {e}", "red")
-                        content = "Error calling action model"
-                        tool_calls = [{"name": "stop", "parameters": {}}]
-
-                    # Debug: save action_model response
-                    if is_debug and debug_file_path:
-                        with open(debug_file_path, "a", encoding="utf-8") as f:
-                            f.write("ACTION_MODEL RESPONSE:\n")
-                            f.write(f"Content: {content}\n")
-                            f.write(f"Tool calls: {tool_calls}\n")
-                            f.write("=" * 50 + "\n\n")
-
-                    if content:
-                        content_safe = (
-                            str(content)
-                            if content is not None
-                            else "No content"
-                        )
-                        self.messages.append(
-                            Message(
-                                logger.log(f"THOUGHT: {content_safe}", "blue"),
-                            ),
-                        )
-
-                    should_continue = False
-                    for tool_call in tool_calls:
-                        if self._is_cancelled:
-                            break
-                        name, parameters = tool_call.get(
-                            "name",
-                        ), tool_call.get(
-                            "parameters",
-                        )
-                        should_continue = name != "stop"
-                        if not should_continue:
-                            # 发射任务完成状态
-                            self.emit_status(
-                                "TASK",
-                                {
-                                    "total_steps": step_count,
-                                    "instruction": instruction,
-                                },
-                            )
-                            break
-
-                        # 发射动作执行开始状态
-                        step_info["action_parsed"] = (
-                            f"Action: {name} Params: {str(parameters)}"
-                        )
-
-                        self.emit_status("STEP", step_info)
-
-                        # Print the tool-call in an easily readable format
-                        logger.log(f"ACTION: {name} {str(parameters)}", "red")
-                        # format used by the model
-                        self.messages.append(Message(json.dumps(tool_call)))
-                        step_info["human_help_status"] = False
-                        if name == HUMAN_HELP_ACTION:
-                            import time
-
-                            time_to_sleep = int(
-                                os.getenv("HUMAN_WAIT_TIME", 15),
-                            )
-                            task = (
-                                parameters.get("task", "")
-                                if parameters
+                    # 根据模式决定如何处理动作
+                    if self.mode == "pc_use":
+                        # pc_use 模式：直接使用 analyse_screenshot 返回的 mode_response
+                        mode_response = auxiliary_info.get("mode_response")
+                        if mode_response:
+                            # 记录 thought 到消息历史
+                            thought = (
+                                getattr(mode_response, "thought", "")
+                                if hasattr(mode_response, "thought")
                                 else ""
                             )
-                            logger.log(
-                                "HUMAN_HELP: The system will waited "
-                                f"for {time_to_sleep} "
-                                f"seconds for human to do the task: {task}",
-                            )
-                            step_info["action_executed"] = (
-                                f"The system will waited for {time_to_sleep} "
-                                f"seconds for human to do the task:\n\n {task}"
-                            )
-                            if not self._interrupted:
-                                step_info["human_help_status"] = True
-                            self.emit_status("STEP", step_info)
-                            # 可中断等待
-                            start_time = time.time()
-                            waited_time = 0
-                            sleep_interval = min(
-                                5,
-                                time_to_sleep,
-                            )  # 每次最多等待5秒
-
-                            # 重置中断标志
-                            self._interrupted = False
-
-                            # 可中断的等待循环
-                            while (
-                                waited_time < time_to_sleep
-                                and not self._interrupted
-                            ):
-                                time.sleep(
-                                    min(
-                                        sleep_interval,
-                                        time_to_sleep - waited_time,
+                            if thought:
+                                self.messages.append(
+                                    Message(
+                                        logger.log(
+                                            f"THOUGHT: {thought}",
+                                            "blue",
+                                        ),
                                     ),
                                 )
-                                waited_time = time.time() - start_time
 
-                            if self._interrupted:
-                                logger.log(
-                                    "Human help wait was interrupted by user.",
-                                    "yellow",
-                                )
-                                self._interrupted = False  # 重置标志
+                            # 记录 action 信息
+                            action = (
+                                getattr(mode_response, "action", "")
+                                if hasattr(mode_response, "action")
+                                else "unknown"
+                            )
+                            action_params = (
+                                getattr(mode_response, "action_params", {})
+                                if hasattr(mode_response, "action_params")
+                                else {}
+                            )
 
-                            else:
-                                logger.log(
-                                    "Human help wait completed.",
-                                    "yellow",
-                                )
+                            # 发射动作执行开始状态
+                            step_info["action_parsed"] = (
+                                f"Action: {action} Params:"
+                                f" {str(action_params)}"
+                            )
+                            self.emit_status("STEP", step_info)
 
-                            break
-                        try:
-                            result = self.call_function(name, parameters)
-                        except Exception as e:
-                            result = f"Error executing function: {str(e)}"
                             logger.log(
-                                f"Error executing function:{e},{result}",
+                                f"ACTION: {action} {str(action_params)}",
                                 "red",
                             )
-                            continue
 
-                        # 发射动作执行完成状态
-                        step_info["action_executed"] = (
-                            str(result) if result is not None else "No result"
-                        )
+                            # 直接执行动作
+                            action_result = self._execute_pc_action(
+                                mode_response,
+                                step_count,
+                            )
 
-                        self.emit_status("STEP", step_info)
+                            # 处理返回结果
+                            if isinstance(action_result, dict):
+                                if action_result.get("result") == "stop":
+                                    should_continue = False
+                                    # 发射任务完成状态
+                                    self.emit_status(
+                                        "TASK",
+                                        {
+                                            "total_steps": step_count,
+                                            "instruction": instruction,
+                                        },
+                                    )
+                                    break
 
-                        result_safe = (
-                            str(result) if result is not None else "No result"
-                        )
-                        self.messages.append(
+                                # 更新状态信息
+                                status_info = action_result.get(
+                                    "status_info",
+                                    {},
+                                )
+                                if status_info:
+                                    step_info.update(status_info)
+
+                                # 如果 human_help 状态已更新，发送状态更新
+                                if step_info.get("human_help_status") is True:
+                                    self.emit_status("STEP", step_info)
+
+                                # 记录执行结果
+                                output = action_result.get(
+                                    "output",
+                                    "Action executed",
+                                )
+                                step_info["action_executed"] = output
+                                self.emit_status("STEP", step_info)
+
+                                # 添加到消息历史
+                                self.messages.append(
+                                    Message(
+                                        logger.log(
+                                            f"OBSERVATION: {output}",
+                                            "yellow",
+                                        ),
+                                    ),
+                                )
+                            else:
+                                should_continue = True
+                        else:
+                            logger.log(
+                                "Warning: No mode_response in pc_use mode",
+                                "yellow",
+                            )
+                            should_continue = False
+                            break
+
+                    elif self.mode == "qwen_vl":
+                        # qwen_vl 模式：仍然需要模型来解析动作（保留原有逻辑）
+                        action_messages = [
+                            Message(action_system_prompt, role="system"),
+                            *self.messages,
                             Message(
                                 logger.log(
-                                    f"OBSERVATION: {result_safe}",
-                                    "yellow",
+                                    f"{screenshot_analysis}",
+                                    "green",
                                 ),
+                                role="user",
                             ),
-                        )
+                        ]
+
+                        # Debug: save action_model request
+                        if is_debug and debug_file_path:
+                            with open(
+                                debug_file_path,
+                                "a",
+                                encoding="utf-8",
+                            ) as f:
+                                f.write(f"\n{'=' * 50}\n")
+                                f.write(
+                                    f"ACTION_MODEL REQUEST - "
+                                    f"{datetime.datetime.now()}\n",
+                                )
+                                f.write("=" * 50 + "\n")
+                                for i, msg in enumerate(action_messages):
+                                    role = msg.get("role", "user")
+                                    f.write(
+                                        f"Message {i + 1} (role: {role}):\n",
+                                    )
+                                    content = msg.get("content", msg)
+                                    content_str = str(content)
+                                    truncated = (
+                                        content_str[:1000] + "..."
+                                        if len(content_str) > 1000
+                                        else content_str
+                                    )
+                                    f.write(f"  Content: {truncated}\n")
+
+                        try:
+                            content, tool_calls = action_model.call(
+                                action_messages,
+                                self.tools,
+                            )
+                        except Exception as e:
+                            logger.log(
+                                f"Error calling action model: {e}",
+                                "red",
+                            )
+                            content = "Error calling action model"
+                            tool_calls = [{"name": "stop", "parameters": {}}]
+
+                        # Debug: save action_model response
+                        if is_debug and debug_file_path:
+                            with open(
+                                debug_file_path,
+                                "a",
+                                encoding="utf-8",
+                            ) as f:
+                                f.write("ACTION_MODEL RESPONSE:\n")
+                                f.write(f"Content: {content}\n")
+                                f.write(f"Tool calls: {tool_calls}\n")
+                                f.write("=" * 50 + "\n\n")
+
+                        if content:
+                            content_safe = (
+                                str(content)
+                                if content is not None
+                                else "No content"
+                            )
+                            self.messages.append(
+                                Message(
+                                    logger.log(
+                                        f"THOUGHT: {content_safe}",
+                                        "blue",
+                                    ),
+                                ),
+                            )
+
+                        should_continue = False
+                        for tool_call in tool_calls:
+                            if self._is_cancelled:
+                                break
+                            name, parameters = tool_call.get(
+                                "name",
+                            ), tool_call.get(
+                                "parameters",
+                            )
+                            should_continue = name != "stop"
+                            if not should_continue:
+                                # 发射任务完成状态
+                                self.emit_status(
+                                    "TASK",
+                                    {
+                                        "total_steps": step_count,
+                                        "instruction": instruction,
+                                    },
+                                )
+                                break
+
+                            # 发射动作执行开始状态
+                            step_info["action_parsed"] = (
+                                f"Action: {name} Params: {str(parameters)}"
+                            )
+
+                            self.emit_status("STEP", step_info)
+
+                            # Print the tool-call in an easily readable format
+                            logger.log(
+                                f"ACTION: {name} {str(parameters)}",
+                                "red",
+                            )
+                            # format used by the model
+                            self.messages.append(
+                                Message(json.dumps(tool_call)),
+                            )
+
+                            # 初始化 human_help_status
+                            step_info["human_help_status"] = False
+
+                            try:
+                                result = self.call_function(
+                                    name,
+                                    parameters,
+                                    step_info,
+                                )
+
+                                # 如果 human_help 状态已更新，发送状态更新
+                                if step_info.get("human_help_status") is True:
+                                    self.emit_status("STEP", step_info)
+                            except Exception as e:
+                                result = f"Error executing function: {str(e)}"
+                                logger.log(
+                                    f"Error executing function:{e},{result}",
+                                    "red",
+                                )
+                                continue
+
+                            # 发射动作执行完成状态
+                            step_info["action_executed"] = (
+                                str(result)
+                                if result is not None
+                                else "No result"
+                            )
+
+                            self.emit_status("STEP", step_info)
+
+                            result_safe = (
+                                str(result)
+                                if result is not None
+                                else "No result"
+                            )
+                            self.messages.append(
+                                Message(
+                                    logger.log(
+                                        f"OBSERVATION: {result_safe}",
+                                        "yellow",
+                                    ),
+                                ),
+                            )
+                    else:
+                        logger.log(f"Unknown mode: {self.mode}", "red")
+                        should_continue = False
+                        break
                 if self._is_cancelled:
                     print("✅ Task canceled")
                     break
