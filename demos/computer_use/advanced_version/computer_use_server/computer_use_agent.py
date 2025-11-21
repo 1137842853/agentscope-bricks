@@ -3,6 +3,7 @@ import os
 import datetime
 import requests
 import json
+import re
 from PIL import Image
 from typing import Optional, Any, AsyncGenerator, Union
 
@@ -37,6 +38,17 @@ TYPING_DELAY_MS = 12
 TYPING_GROUP_SIZE = 50
 HUMAN_HELP_ACTION = "human_help"
 gui_agent = GuiAgent()
+
+
+class GreenNetInterceptionError(RuntimeError):
+    """绿网拦截错误，需要立即终止任务"""
+
+    def __init__(self, message, request_id=None, error_code=None):
+        super().__init__(message)
+        self.request_id = request_id
+        self.error_code = error_code
+        self.is_green_net_error = True
+
 
 # 资源池配置 - 从环境变量或默认值获取
 PHONE_INSTANCE_IDS = (
@@ -510,6 +522,32 @@ class ComputerUseAgent(Agent):
                             else:
                                 yield data_content
 
+                    except GreenNetInterceptionError as green_net_error:
+                        # 绿网拦截错误：立即终止任务
+                        error_msg = str(green_net_error)
+                        logger.error(
+                            f"绿网拦截错误，立即终止任务: {error_msg}",
+                        )
+                        self._is_cancelled = True  # 立即设置取消标志
+                        should_continue = False  # 终止内层循环
+                        yield DataContent(
+                            data={
+                                "step": f"{step_count}",
+                                "stage": "error",
+                                "type": "text",
+                                "text": error_msg,
+                            },
+                        )
+                        # 发送任务终止消息
+                        yield DataContent(
+                            data={
+                                "step": "",
+                                "stage": "canceled",
+                                "type": "text",
+                                "text": "⏹️ 任务因内容安全检测已终止",
+                            },
+                        )
+                        break  # 立即退出内层循环
                     except Exception as analyse_error:
                         error_msg = f"Analysis failed: {str(analyse_error)}"
                         logger.error(error_msg)
@@ -647,6 +685,31 @@ class ComputerUseAgent(Agent):
                                 )
                                 self._is_cancelled = True
 
+                    except GreenNetInterceptionError as green_net_error:
+                        # 绿网拦截错误：立即终止任务
+                        error_msg = str(green_net_error)
+                        logger.error(
+                            f"执行操作时遇到绿网拦截错误，立即终止任务: {error_msg}",
+                        )
+                        self._is_cancelled = True  # 立即设置取消标志
+                        should_continue = False  # 终止内层循环
+                        yield DataContent(
+                            data={
+                                "step": f"{step_count}",
+                                "stage": "error",
+                                "type": "text",
+                                "text": error_msg,
+                            },
+                        )
+                        yield DataContent(
+                            data={
+                                "step": "",
+                                "stage": "canceled",
+                                "type": "text",
+                                "text": "⏹️ 任务因内容安全检测已终止",
+                            },
+                        )
+                        break  # 立即退出内层循环
                     except Exception as action_error:
                         error_msg = f"执行操作时出错: {str(action_error)}"
                         logger.error(error_msg)
@@ -692,27 +755,40 @@ class ComputerUseAgent(Agent):
                     )
                     break
 
+        except GreenNetInterceptionError as green_net_error:
+            # 绿网拦截错误：任务已终止
+            # 注意：错误消息可能已经在内层循环中发送过了，这里只做最终确认
+            error_msg = str(green_net_error)
+            logger.error(f"任务因绿网拦截终止: {error_msg}")
+            self._is_cancelled = True  # 确保取消标志已设置
+
+            # 如果内层循环没有发送消息（理论上不应该发生），这里作为兜底
+            # 但通常内层循环已经发送过了，所以这里只发送一个确认消息
+            yield DataContent(
+                data={
+                    "step": "",
+                    "stage": "canceled",
+                    "type": "text",
+                    "text": "⏹️ 任务因内容安全检测已终止",
+                },
+            )
+            # 确保调用stop方法清理资源
+            self.stop()
         except Exception as e:
             error_msg = str(e)
-            # 检查是否为GUI服务请求失败的错误
-            if (
-                "Error querying" in error_msg
-                and "GUI服务请求失败" in error_msg
-            ):
-                # 尝试提取请求ID
-                import re
+            # 解析错误信息，特别处理绿网拦截错误
+            error_info = self._parse_gui_service_error(e)
 
-                request_id_match = re.search(
-                    r'"request_id":"([^"]+)"',
-                    error_msg,
-                )
-                if request_id_match:
-                    request_id = request_id_match.group(1)
-                    formatted_error = (
-                        f"内部agent调用异常，请求ID: {request_id}"
-                    )
-                else:
-                    formatted_error = "内部agent调用异常"
+            # 检查是否为GUI服务请求失败的错误（包括绿网拦截）
+            if (
+                "GUI服务请求失败" in error_msg
+                or error_info["is_green_net_error"]
+            ):
+                # 使用解析后的友好错误信息
+                formatted_error = error_info["formatted_message"]
+                # 如果是绿网拦截错误，设置取消标志
+                if error_info["is_green_net_error"]:
+                    self._is_cancelled = True
             else:
                 formatted_error = f"执行任务时出错: {error_msg}"
 
@@ -747,6 +823,10 @@ class ComputerUseAgent(Agent):
     def stop(self):
         print("Agent stopped by user request.")
         self._is_cancelled = True
+        # 取消等待任务（如果存在）
+        if self._wait_task and not self._wait_task.done():
+            self._wait_task.cancel()
+            logger.info("等待任务已取消")
         # 发送状态更新到前端
         self.emit_status(
             "SYSTEM",
@@ -1065,6 +1145,58 @@ class ComputerUseAgent(Agent):
     #     with open(file_path, "rb") as file:
     #         return self.equipment.upload_local_file_oss(file, file_name)
 
+    def _parse_gui_service_error(self, error):
+        """
+        解析GUI服务错误，特别处理绿网拦截错误
+        返回格式化的错误信息字典
+        """
+        error_str = str(error)
+        error_dict = {
+            "is_green_net_error": False,
+            "formatted_message": error_str,
+            "request_id": None,
+            "error_code": None,
+        }
+
+        # 检查是否为绿网拦截错误
+        if (
+            "DataInspectionFailed" in error_str
+            or "inappropriate content" in error_str.lower()
+        ):
+            error_dict["is_green_net_error"] = True
+            error_dict["error_code"] = "DataInspectionFailed"
+
+            # 尝试提取request_id
+            request_id_match = re.search(r'"request_id":"([^"]+)"', error_str)
+            if request_id_match:
+                error_dict["request_id"] = request_id_match.group(1)
+
+            # 生成友好的错误提示
+            if error_dict["request_id"]:
+                error_dict["formatted_message"] = (
+                    f"⚠️ 内容安全检测：输入内容可能包含不当信息，已被系统拦截。"
+                    f"请求ID: {error_dict['request_id']}。"
+                    f"请检查输入内容或稍后重试。"
+                )
+            else:
+                error_dict["formatted_message"] = (
+                    "⚠️ 内容安全检测：输入内容可能包含不当信息，已被系统拦截。"
+                    "请检查输入内容或稍后重试。"
+                )
+        # 检查是否为GUI服务请求失败
+        elif "GUI服务请求失败" in error_str or "Error querying" in error_str:
+            # 尝试提取request_id
+            request_id_match = re.search(r'"request_id":"([^"]+)"', error_str)
+            if request_id_match:
+                error_dict["request_id"] = request_id_match.group(1)
+                error_dict["formatted_message"] = (
+                    f"内部agent调用异常，请求ID: {error_dict['request_id']}"
+                )
+            else:
+                error_dict["formatted_message"] = "内部agent调用异常"
+
+        return error_dict
+
     def _handle_action_error(self, error, action_type="action"):
         """处理动作执行错误的通用方法"""
         error_msg = f"Error in {action_type}: {str(error)}"
@@ -1382,8 +1514,43 @@ class ComputerUseAgent(Agent):
                 result = json.dumps(result_data, ensure_ascii=False)
 
             except Exception as e:
+                # 解析GUI服务错误，特别处理绿网拦截错误
+                error_info = self._parse_gui_service_error(e)
                 logger.error(f"Error querying PC use model: {e}")
-                raise RuntimeError(f"Error querying PC use model: {e}")
+
+                # 发送错误信息
+                yield DataContent(
+                    data={
+                        "step": f"{step_count}",
+                        "stage": "error",
+                        "type": "SYSTEM",
+                        "text": error_info["formatted_message"],
+                    },
+                )
+
+                # 发送分析阶段失败状态，确保前端不会卡在AI分析阶段
+                yield DataContent(
+                    data={
+                        "step": f"{step_count}",
+                        "stage": "error",
+                        "type": "analysis_stage",
+                        "text": "Analysis failed",
+                        "timestamp": time.time(),
+                        "uuid": str(uuid4()),
+                    },
+                )
+
+                # 如果是绿网拦截错误，抛出特殊异常以立即终止任务
+                if error_info["is_green_net_error"]:
+                    raise GreenNetInterceptionError(
+                        error_info["formatted_message"],
+                        request_id=error_info.get("request_id"),
+                        error_code=error_info.get("error_code"),
+                    )
+                else:
+                    raise RuntimeError(
+                        f"GUI服务请求失败: {error_info['formatted_message']}",
+                    )
         elif self.mode == "phone_use":
             try:
                 messages = [
@@ -1516,15 +1683,19 @@ class ComputerUseAgent(Agent):
                     "",
                 )
             except Exception as e:
+                # 解析GUI服务错误，特别处理绿网拦截错误
+                error_info = self._parse_gui_service_error(e)
+                logger.error(f"Error querying Phone use model: {e}")
+
+                # 发送错误信息
                 yield DataContent(
                     data={
                         "step": f"{step_count}",
                         "stage": "error",
                         "type": "SYSTEM",
-                        "text": "Error querying Phone use model %s" % e,
+                        "text": error_info["formatted_message"],
                     },
                 )
-                logger.error(f"Error querying Phone use model: {e}")
 
                 # 发送分析阶段失败状态，确保前端不会卡在AI分析阶段
                 yield DataContent(
@@ -1537,8 +1708,18 @@ class ComputerUseAgent(Agent):
                         "uuid": str(uuid4()),
                     },
                 )
-                logger.error(f"Error querying Phone use model: {e}")
-                raise RuntimeError(f"Error querying Phone use model: {e}")
+
+                # 如果是绿网拦截错误，抛出特殊异常以立即终止任务
+                if error_info["is_green_net_error"]:
+                    raise GreenNetInterceptionError(
+                        error_info["formatted_message"],
+                        request_id=error_info.get("request_id"),
+                        error_code=error_info.get("error_code"),
+                    )
+                else:
+                    raise RuntimeError(
+                        f"GUI服务请求失败: {error_info['formatted_message']}",
+                    )
         else:
             logger.error(
                 f"Invalid mode: {self.mode},"

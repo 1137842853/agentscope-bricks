@@ -143,7 +143,7 @@ with left_col:
 
             **示例任务：**
             - use the web browser to get the current weather
-            in Hangzhou via Bing Search
+            in Hangzhou
             """,
             )
 

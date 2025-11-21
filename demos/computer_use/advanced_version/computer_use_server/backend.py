@@ -7,6 +7,7 @@ import requests
 import uuid
 import weakref
 import socket
+import datetime
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -76,20 +77,57 @@ def _serialize(obj):
     if isinstance(obj, (list, tuple, set)):
         return [_serialize(v) for v in obj]
 
-    # 4. 具有 __dict__ 的普通对象
+    # 4. 处理特殊类型
+    if isinstance(obj, (bytes, bytearray)):
+        try:
+            return obj.decode("utf-8")
+        except UnicodeDecodeError:
+            return f"<bytes: {len(obj)} bytes>"
+
+    if isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+
+    if isinstance(obj, (datetime.date, datetime.time)):
+        return str(obj)
+
+    # 5. 具有 __dict__ 的普通对象
     if hasattr(obj, "__dict__"):
-        return {k: _serialize(v) for k, v in obj.__dict__.items()}
+        try:
+            return {k: _serialize(v) for k, v in obj.__dict__.items()}
+        except (AttributeError, TypeError) as e:
+            return (
+                f"<object: {type(obj).__name__} (serialization"
+                f" error: {str(e)})>"
+            )
 
-    # 5. 具有 __slots__ 的对象
+    # 6. 具有 __slots__ 的对象
     if hasattr(obj, "__slots__"):
-        return {
-            name: _serialize(getattr(obj, name))
-            for name in obj.__slots__
-            if hasattr(obj, name)
-        }
+        try:
+            return {
+                name: _serialize(getattr(obj, name))
+                for name in obj.__slots__
+                if hasattr(obj, name)
+            }
+        except (AttributeError, TypeError) as e:
+            return (
+                f"<object: {type(obj).__name__} (serialization"
+                f" error: {str(e)})>"
+            )
 
-    # 6. 其它：返回可读字符串
-    return repr(obj)
+    # 7. 尝试调用对象的__str__或__repr__
+    try:
+        if hasattr(obj, "__str__"):
+            str_repr = str(obj)
+            # 如果字符串表示不太长，直接返回
+            if len(str_repr) < 1000:
+                return str_repr
+            else:
+                return f"<{type(obj).__name__}: {str_repr[:100]}...>"
+    except Exception:
+        pass
+
+    # 8. 其它：返回类型名称
+    return f"<{type(obj).__name__}: unable to serialize>"
 
 
 # utils
@@ -1066,10 +1104,53 @@ async def _handle_new_stream(
     logger.info(f"开始新任务，用户: {user_id}, 对话: {chat_id}")
 
     async def agent_stream():
-        """Agent流式响应生成器 - 支持序列号存储"""
+        """Agent流式响应生成器 - 支持序列号存储，优化错误处理"""
         task_id = None
-        try:
+        agent = None
+        async_iterator = None
+        background_tasks = []  # 后台任务列表
 
+        def safe_json_dumps(obj, default=None):
+            """安全的JSON序列化，处理特殊类型"""
+            try:
+                return json.dumps(obj, ensure_ascii=False, default=default)
+            except (TypeError, ValueError) as e:
+                logger.warning(f"JSON序列化失败，使用fallback: {e}")
+                # 尝试使用自定义序列化
+                try:
+                    return json.dumps(_serialize(obj), ensure_ascii=False)
+                except Exception as fallback_error:
+                    logger.error(f"Fallback序列化也失败: {fallback_error}")
+                    return json.dumps(
+                        {
+                            "error": "序列化失败",
+                            "error_type": str(type(obj).__name__),
+                            "error_message": str(fallback_error),
+                        },
+                        ensure_ascii=False,
+                    )
+
+        async def store_to_redis_background(
+            user_id: str,
+            chat_id: str,
+            data: dict,
+            task_id: str,
+        ):
+            """后台存储到Redis，不阻塞流式输出"""
+            try:
+                await safe_redis_operation(
+                    state_manager.store_stream_data,
+                    user_id,
+                    chat_id,
+                    data,
+                    task_id,
+                    timeout=5.0,
+                    max_retries=1,
+                )
+            except Exception as bg_error:
+                logger.warning(f"后台Redis存储失败: {bg_error}")
+
+        try:
             # 创建AgentScope Context模拟对象
             class MockContext:
                 def __init__(self, request):
@@ -1077,23 +1158,49 @@ async def _handle_new_stream(
 
             context = MockContext(request)
 
-            # 清空旧的流式数据
-            await state_manager.clear_stream_data(user_id, chat_id)
+            # 清空旧的流式数据（带超时保护）
+            try:
+                await asyncio.wait_for(
+                    state_manager.clear_stream_data(user_id, chat_id),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("清空流式数据超时，继续执行")
+            except Exception as clear_error:
+                logger.warning(f"清空流式数据失败: {clear_error}")
 
-            # 设置任务状态
-            await state_manager.update_chat_state(
-                user_id,
-                chat_id,
-                {
-                    "is_running": True,
-                    "current_task": f"Agent API Task from input:"
-                    f" {len(request.input)} messages",
-                },
-            )
+            # 设置任务状态（带超时保护）
+            try:
+                await asyncio.wait_for(
+                    state_manager.update_chat_state(
+                        user_id,
+                        chat_id,
+                        {
+                            "is_running": True,
+                            "current_task": f"Agent API Task from input:"
+                            f" {len(request.input)} messages",
+                        },
+                    ),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("更新任务状态超时，继续执行")
+            except Exception as state_error:
+                logger.warning(f"更新任务状态失败: {state_error}")
 
             # 重新获取更新后的state
-            chat_state = await state_manager.get_chat_state(user_id, chat_id)
-            task_id = chat_state.get("task_id")
+            try:
+                chat_state = await asyncio.wait_for(
+                    state_manager.get_chat_state(user_id, chat_id),
+                    timeout=5.0,
+                )
+                task_id = chat_state.get("task_id")
+            except asyncio.TimeoutError:
+                logger.error("获取chat_state超时")
+                raise
+            except Exception as get_state_error:
+                logger.error(f"获取chat_state失败: {get_state_error}")
+                raise
 
             # 创建Agent配置
             agent_config = {
@@ -1125,312 +1232,300 @@ async def _handle_new_stream(
             app.state.running_agents[f"{user_id}:{chat_id}"] = agent
 
             # 将agent标识存储到Redis（仅用于状态检查，不是真实对象）
-            await state_manager.update_chat_state(
-                user_id,
-                chat_id,
-                {
-                    "agent_running": True,
-                    "agent_id": id(agent),  # 存储agent的标识符
-                },
-            )
+            try:
+                await asyncio.wait_for(
+                    state_manager.update_chat_state(
+                        user_id,
+                        chat_id,
+                        {
+                            "agent_running": True,
+                            "agent_id": id(agent),  # 存储agent的标识符
+                        },
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as agent_state_error:
+                logger.warning(f"存储agent状态失败: {agent_state_error}")
 
             logger.info(f"开始Agent执行，用户: {user_id}, 对话: {chat_id}")
-            # 执行Agent任务并处理流式输出
-            async_iterator = None
 
-            # 心跳机制变量
+            # 心跳机制变量（仅用于内部检测，不发送给客户端）
             last_heartbeat = time.time()
             heartbeat_interval = 30  # 30秒心跳间隔
+            last_data_time = time.time()  # 最后数据时间
+            max_idle_time = 300  # 最大空闲时间（5分钟）
 
             try:
                 async_iterator = agent.run_async(context)
                 async for result in async_iterator:
-                    # 检查是否需要发送心跳
+                    # 检查客户端是否断开（通过检查停止信号）
+                    try:
+                        if await asyncio.wait_for(
+                            state_manager.check_stop_signal(user_id, chat_id),
+                            timeout=0.1,
+                        ):
+                            logger.info("检测到停止信号，终止流式输出")
+                            break
+                    except (asyncio.TimeoutError, Exception):
+                        pass  # 忽略检查超时或错误，继续执行
+
+                    # 检查是否空闲超时
                     current_time = time.time()
-                    if current_time - last_heartbeat >= heartbeat_interval:
-                        heartbeat_data = {
-                            "object": "heartbeat",
-                            "type": "heartbeat",
-                            "timestamp": current_time,
-                            "status": "alive",
-                            "user_id": user_id,
-                            "chat_id": chat_id,
+                    if current_time - last_data_time > max_idle_time:
+                        logger.warning("流式输出空闲超时，终止连接")
+                        idle_error = {
+                            "sequence_number": None,
+                            "object": "error",
+                            "status": "error",
+                            "error": "流式输出空闲超时",
+                            "type": "timeout_error",
                         }
+                        yield f"data: {safe_json_dumps(idle_error)}\n\n"
+                        break
 
-                        # 尝试存储心跳到Redis（失败也不影响发送）
-                        try:
-                            heartbeat_sequence = await safe_redis_operation(
-                                state_manager.store_stream_data,
-                                user_id,
-                                chat_id,
-                                heartbeat_data,
-                                task_id,
-                                timeout=5.0,
-                                max_retries=1,
-                            )
-                            heartbeat_data["sequence_number"] = (
-                                heartbeat_sequence
-                            )
-                        except Exception as heartbeat_redis_error:
-                            logger.warning(
-                                f"心跳存储到Redis失败: {heartbeat_redis_error}",
-                            )
-                            heartbeat_data["sequence_number"] = None
+                    last_data_time = current_time
 
-                        # 发送心跳
-                        heartbeat_json = json.dumps(
-                            heartbeat_data,
-                            ensure_ascii=False,
-                        )
-                        yield f"data: {heartbeat_json}\n\n"
+                    # 内部心跳检测（仅用于连接状态检测，不发送给客户端）
+                    if current_time - last_heartbeat >= heartbeat_interval:
+                        # 仅更新心跳时间，不发送心跳数据给客户端
+                        # 这样可以保持数据结构一致，同时仍然可以检测连接状态
                         last_heartbeat = current_time
+                        # 可选：后台记录心跳到Redis（用于监控），但不发送给客户端
+                        # heartbeat_data = {
+                        #     "object": "heartbeat",
+                        #     "type": "heartbeat",
+                        #     "timestamp": current_time,
+                        #     "status": "alive",
+                        #     "user_id": user_id,
+                        #     "chat_id": chat_id,
+                        # }
+                        # bg_task = asyncio.create_task(
+                        #     store_to_redis_background(
+                        #         user_id, chat_id, heartbeat_data, task_id
+                        #     )
+                        # )
+                        # background_tasks.append(bg_task)
 
                     try:
                         # 将Agent的输出转换为JSON格式
-                        if hasattr(result, "model_dump"):
-                            result_dict = result.model_dump()
-                        else:
-                            result_dict = _serialize(result)
-
-                        # 直接使用Agent返回的原始数据，只添加序列号
-                        sequence_number = await safe_redis_operation(
-                            state_manager.store_stream_data,
-                            user_id,
-                            chat_id,
-                            result_dict,
-                            task_id,
-                            timeout=10.0,
-                            max_retries=2,
-                        )
-
-                        if sequence_number is not None:
-                            result_dict["sequence_number"] = sequence_number
-                        else:
-                            # Redis存储失败，但仍然发送数据
-                            result_dict["sequence_number"] = None
-                            result_dict["storage_warning"] = (
-                                "数据未能存储到Redis"
-                            )
-
-                        json_str = json.dumps(result_dict, ensure_ascii=False)
-                        yield f"data: {json_str}\n\n"
-
-                    except Exception as serialize_error:
-                        logger.error(f"处理输出时出错: {serialize_error}")
-                        # 存储错误信息
-                        error_data = {
-                            "error": f"序列化输出时出错: {str(serialize_error)}",
-                            "type": "serialization_error",
-                        }
-
-                        sequence_number = await safe_redis_operation(
-                            state_manager.store_stream_data,
-                            user_id,
-                            chat_id,
-                            error_data,
-                            task_id,
-                            timeout=5.0,
-                            max_retries=1,
-                        )
-
-                        # 获取Redis中已标准化的错误数据（如果存储成功）
-                        if sequence_number is not None:
-                            stored_error_list = (
-                                await state_manager.get_stream_seq(
-                                    user_id,
-                                    chat_id,
-                                    sequence_number,
-                                    task_id,
-                                )
-                            )
-
-                            if stored_error_list:
-                                _d = json.dumps(
-                                    stored_error_list[0],
-                                    ensure_ascii=False,
-                                )
-                                yield f"data: {_d}\n\n"
+                        try:
+                            if hasattr(result, "model_dump"):
+                                result_dict = result.model_dump()
                             else:
-                                # 降级方案
-                                error_output = {
-                                    "sequence_number": sequence_number,
-                                    "object": "error",
-                                    "status": "error",
-                                    "error": str(serialize_error),
-                                    "type": "error",
-                                    "data": error_data,
-                                }
-                                _data = json.dumps(
-                                    error_output,
-                                    ensure_ascii=False,
-                                )
-                                yield f"data: {_data}\n\n"
-                        else:
-                            # Redis存储失败，直接发送错误信息
-                            error_output = {
+                                result_dict = _serialize(result)
+                        except Exception as serialize_error:
+                            logger.error(
+                                f"序列化result失败: {serialize_error}",
+                            )
+                            # 创建错误数据
+                            result_dict = {
+                                "error": f"序列化失败: {str(serialize_error)}",
+                                "type": "serialization_error",
+                                "raw_result_type": str(type(result).__name__),
+                            }
+
+                        # 后台存储到Redis（不阻塞流式输出）
+                        result_dict_copy = result_dict.copy()
+                        bg_task = asyncio.create_task(
+                            store_to_redis_background(
+                                user_id,
+                                chat_id,
+                                result_dict_copy,
+                                task_id,
+                            ),
+                        )
+                        background_tasks.append(bg_task)
+
+                        # 先发送数据，序列号稍后更新（如果需要可以异步更新）
+                        result_dict["sequence_number"] = None
+                        result_dict["storage_status"] = "pending"
+
+                        try:
+                            json_str = safe_json_dumps(result_dict)
+                            yield f"data: {json_str}\n\n"
+                        except Exception as yield_error:
+                            logger.error(f"yield数据失败: {yield_error}")
+                            # 发送错误消息
+                            error_msg = {
                                 "sequence_number": None,
                                 "object": "error",
                                 "status": "error",
-                                "error": str(serialize_error),
-                                "type": "error",
-                                "data": error_data,
-                                "storage_warning": "错误信息未能存储到Redis",
+                                "error": f"发送数据失败: {str(yield_error)}",
+                                "type": "yield_error",
                             }
-                            _data = json.dumps(
-                                error_output,
-                                ensure_ascii=False,
+                            yield f"data: {safe_json_dumps(error_msg)}\n\n"
+                            continue
+
+                    except Exception as process_error:
+                        logger.error(
+                            f"处理输出时出错: {process_error}",
+                            exc_info=True,
+                        )
+                        # 创建错误数据
+                        error_data = {
+                            "sequence_number": None,
+                            "object": "error",
+                            "status": "error",
+                            "error": f"处理输出时出错: {str(process_error)}",
+                            "type": "processing_error",
+                        }
+
+                        # 后台存储错误
+                        bg_task = asyncio.create_task(
+                            store_to_redis_background(
+                                user_id,
+                                chat_id,
+                                error_data,
+                                task_id,
+                            ),
+                        )
+                        background_tasks.append(bg_task)
+
+                        # 立即发送错误
+                        try:
+                            error_json = safe_json_dumps(error_data)
+                            yield f"data: {error_json}\n\n"
+                        except Exception as error_yield_error:
+                            logger.error(
+                                f"发送错误消息失败: {error_yield_error}",
                             )
-                            yield f"data: {_data}\n\n"
                         continue
 
+            except asyncio.CancelledError:
+                logger.info(
+                    f"Agent流式输出被取消，用户: {user_id}, 对话: {chat_id}",
+                )
+                # 发送取消消息
+                cancel_msg = {
+                    "sequence_number": None,
+                    "object": "error",
+                    "status": "cancelled",
+                    "error": "任务已取消",
+                    "type": "cancelled",
+                }
+                try:
+                    yield f"data: {safe_json_dumps(cancel_msg)}\n\n"
+                except Exception:
+                    pass
+                raise
+            except GeneratorExit:
+                logger.info(
+                    f"Agent流式输出生成器退出，用户: {user_id}, 对话: {chat_id}",
+                )
+                raise
             except Exception as iteration_error:
-                logger.error(f"Agent执行时出错: {iteration_error}")
-                # 存储执行错误
+                logger.error(
+                    f"Agent执行时出错: {iteration_error}",
+                    exc_info=True,
+                )
+                # 创建错误数据
                 error_data = {
+                    "sequence_number": None,
+                    "object": "error",
+                    "status": "error",
                     "error": f"Agent执行时出错: {str(iteration_error)}",
                     "type": "iteration_error",
                 }
 
-                sequence_number = await safe_redis_operation(
-                    state_manager.store_stream_data,
-                    user_id,
-                    chat_id,
-                    error_data,
-                    task_id,
-                    timeout=5.0,
-                    max_retries=1,
-                )
-
-                # 获取Redis中已标准化的错误数据（如果存储成功）
-                if sequence_number is not None:
-                    stored_error_list = (
-                        await state_manager.get_stream_data_from_sequence(
+                # 后台存储错误
+                try:
+                    bg_task = asyncio.create_task(
+                        store_to_redis_background(
                             user_id,
                             chat_id,
-                            sequence_number,
+                            error_data,
                             task_id,
-                        )
+                        ),
                     )
+                    background_tasks.append(bg_task)
+                except Exception:
+                    pass
 
-                    if stored_error_list:
-                        _d = json.dumps(
-                            stored_error_list[0],
-                            ensure_ascii=False,
-                        )
-                        yield f"data: {_d}\n\n"
-                    else:
-                        # 降级方案
-                        error_output = {
-                            "sequence_number": sequence_number,
-                            "object": "error",
-                            "status": "error",
-                            "error": str(iteration_error),
-                            "type": "error",
-                            "data": error_data,
-                        }
-                        _d = json.dumps(error_output, ensure_ascii=False)
-                        yield f"data: {_d}\n\n"
-                else:
-                    # Redis存储失败，直接发送错误信息
-                    error_output = {
-                        "sequence_number": None,
-                        "object": "error",
-                        "status": "error",
-                        "error": str(iteration_error),
-                        "type": "error",
-                        "data": error_data,
-                        "storage_warning": "执行错误信息未能存储到Redis",
-                    }
-                    _d = json.dumps(error_output, ensure_ascii=False)
-                    yield f"data: {_d}\n\n"
+                # 立即发送错误
+                try:
+                    error_json = safe_json_dumps(error_data)
+                    yield f"data: {error_json}\n\n"
+                except Exception as error_yield_error:
+                    logger.error(f"发送迭代错误消息失败: {error_yield_error}")
 
             finally:
                 # 清理资源
-                if async_iterator and hasattr(async_iterator, "aclose"):
-                    try:
-                        await async_iterator.aclose()
-                    except Exception as close_error:
-                        print(f"关闭异步迭代器时出错: {close_error}")
+                try:
+                    if async_iterator and hasattr(async_iterator, "aclose"):
+                        await asyncio.wait_for(
+                            async_iterator.aclose(),
+                            timeout=5.0,
+                        )
+                except (asyncio.TimeoutError, Exception) as close_error:
+                    logger.warning(f"关闭异步迭代器时出错: {close_error}")
 
-            print(f"Agent执行完成，用户: {user_id}, 对话: {chat_id}")
+                # 等待后台任务完成（最多等待3秒）
+                if background_tasks:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(
+                                *background_tasks,
+                                return_exceptions=True,
+                            ),
+                            timeout=3.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("后台任务未在超时内完成，继续清理")
+                    except Exception as bg_wait_error:
+                        logger.warning(f"等待后台任务时出错: {bg_wait_error}")
+
+            logger.info(f"Agent执行完成，用户: {user_id}, 对话: {chat_id}")
 
         except Exception as e:
             logger.error(
                 f"Agent stream execution failed for user {user_id}, "
                 f"chat {chat_id}: {e}",
+                exc_info=True,
             )
-            # 存储全局错误
+            # 创建错误数据
             error_data = {
+                "sequence_number": None,
+                "object": "error",
+                "status": "error",
                 "error": f"任务执行失败: {str(e)}",
                 "type": "agent_error",
             }
 
             try:
-                sequence_number = await safe_redis_operation(
-                    state_manager.store_stream_data,
-                    user_id,
-                    chat_id,
-                    error_data,
-                    task_id,
-                    timeout=5.0,
-                    max_retries=1,
-                )
-
-                # 获取Redis中已标准化的错误数据（如果存储成功）
-                if sequence_number is not None:
-                    stored_error_list = (
-                        await state_manager.get_stream_data_from_sequence(
+                # 尝试后台存储错误
+                try:
+                    bg_task = asyncio.create_task(
+                        store_to_redis_background(
                             user_id,
                             chat_id,
-                            sequence_number,
+                            error_data,
                             task_id,
-                        )
+                        ),
                     )
+                    background_tasks.append(bg_task)
+                except Exception:
+                    pass
 
-                    if stored_error_list:
-                        _d = json.dumps(
-                            stored_error_list[0],
-                            ensure_ascii=False,
-                        )
-                        yield f"data: {_d}\n\n"
-                    else:
-                        # 降级方案
-                        error_output = {
-                            "sequence_number": sequence_number,
+                # 立即发送错误
+                error_json = safe_json_dumps(error_data)
+                yield f"data: {error_json}\n\n"
+            except Exception as final_error:
+                logger.error(f"发送最终错误消息失败: {final_error}")
+                # 最后的降级方案
+                try:
+                    final_error_msg = json.dumps(
+                        {
+                            "sequence_number": None,
                             "object": "error",
                             "status": "error",
-                            "error": str(e),
-                            "type": "error",
-                            "data": error_data,
-                        }
-                        _d = json.dumps(error_output, ensure_ascii=False)
-                        yield f"data: {_d}\n\n"
-                else:
-                    # Redis存储失败，直接发送错误信息
-                    error_output = {
-                        "sequence_number": None,
-                        "object": "error",
-                        "status": "error",
-                        "error": str(e),
-                        "type": "error",
-                        "data": error_data,
-                        "storage_warning": "全局错误信息未能存储到Redis",
-                    }
-                    _d = json.dumps(error_output, ensure_ascii=False)
-                    yield f"data: {_d}\n\n"
-            except Exception as storage_error:
-                print(f"存储错误信息失败: {storage_error}")
-                # 最后的错误输出，不存储到Redis
-                final_error = {
-                    "sequence_number": None,
-                    "object": "error",
-                    "status": "error",
-                    "error": str(e),
-                    "type": "error",
-                    "data": {"error": str(e)},
-                }
-                _d = json.dumps(final_error, ensure_ascii=False)
-                yield f"data: {_d}\n\n"
+                            "error": f"任务执行失败: {str(e)}",
+                            "type": "fatal_error",
+                        },
+                        ensure_ascii=False,
+                    )
+                    yield f"data: {final_error_msg}\n\n"
+                except Exception:
+                    pass  # 如果连这个都失败，只能放弃
 
         finally:
             # 清理状态
@@ -1440,18 +1535,29 @@ async def _handle_new_stream(
                 if composite_key in app.state.running_agents:
                     del app.state.running_agents[composite_key]
 
-                await state_manager.update_chat_state(
-                    user_id,
-                    chat_id,
-                    {
-                        "is_running": False,
-                        "current_task": None,
-                        "agent_running": False,
-                        "agent_id": None,
-                    },
-                )
+                # 更新状态（带超时保护）
+                try:
+                    await asyncio.wait_for(
+                        state_manager.update_chat_state(
+                            user_id,
+                            chat_id,
+                            {
+                                "is_running": False,
+                                "current_task": None,
+                                "agent_running": False,
+                                "agent_id": None,
+                            },
+                        ),
+                        timeout=5.0,
+                    )
+                except (
+                    asyncio.TimeoutError,
+                    Exception,
+                ) as cleanup_state_error:
+                    logger.warning(f"清理状态时出错: {cleanup_state_error}")
+
             except Exception as cleanup_error:
-                print(f"清理状态时出错: {cleanup_error}")
+                logger.error(f"清理资源时出错: {cleanup_error}", exc_info=True)
 
     return StreamingResponse(
         agent_stream(),
